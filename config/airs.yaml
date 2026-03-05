@@ -1,0 +1,42 @@
+app:
+  name: AIRS
+  environment: local
+
+kafka:
+  bootstrap_servers: kafka:9092
+  topics:
+    logs: logs-topic
+    processed_logs: processed-logs-topic
+    anomalies: anomalies-topic
+    incidents: incidents-topic
+    dlq: airs-dlq-topic
+
+redis:
+  url: redis://redis:6379/0
+
+opensearch:
+  url: http://opensearch:9200
+  logs_index: airs-logs
+  incidents_index: airs-incidents
+  sources_index: airs-sources
+
+llm:
+  provider: ollama
+  model: qwen2.5:7b-instruct
+  fallback_model: rjmalagon/qwen2:1.5b-instruct
+  timeout_seconds: 8
+  retries: 2
+  ollama_base_url: http://ollama:11434
+  openai_base_url: https://api.openai.com/v1
+  openai_api_key_env: OPENAI_API_KEY
+
+pipeline:
+  baseline_window_minutes: 15
+  correlation_window_minutes: 10
+  anomaly_threshold: 2.5
+  dashboard_poll_seconds: 5
+  source_poll_tick_seconds: 5
+  log_retention_days: 5
+  incident_retention_days: 30
+  max_log_payload_kb: 256
+  max_manual_analyze_kb: 512

@@ -1,0 +1,12 @@
+flowchart LR
+    A[Ingestion Service] -->|logs-topic| B[Log Processor]
+    B -->|processed-logs-topic| C[Anomaly Service]
+    C -->|anomalies-topic| D[Correlation Service]
+    D -->|incidents-topic| E[AI Service]
+    E --> F[OpenSearch incidents index]
+    B --> G[OpenSearch logs index]
+    H[API Gateway] --> F
+    H --> E
+    I[Next.js UI] --> H
+    J[Redis] --> E
+    K[Ollama/OpenAI] --> E

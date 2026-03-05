@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: airs-api-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api-gateway:8000"]
+
+  - job_name: airs-ingestion-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ingestion-service:8001"]
+
+  - job_name: airs-log-processor
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["log-processor:8002"]
+
+  - job_name: airs-anomaly-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["anomaly-service:8003"]
+
+  - job_name: airs-correlation-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["correlation-service:8004"]
+
+  - job_name: airs-ai-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ai-service:8005"]

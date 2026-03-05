@@ -1,0 +1,281 @@
+services:
+  # ─────────────────────────────────────────────────────────────
+  # Infrastructure
+  # ─────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: airs-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: airs-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    container_name: airs-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Admin1234!}
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: airs-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ─────────────────────────────────────────────────────────────
+  # Pipeline Services
+  # ─────────────────────────────────────────────────────────────
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.python
+    container_name: airs-ingestion-service
+    restart: unless-stopped
+    working_dir: /app/services/ingestion-service/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    environment:
+      AIRS_CONFIG_FILE: /app/config/airs.yaml
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  log-processor:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.python
+    container_name: airs-log-processor
+    restart: unless-stopped
+    working_dir: /app/services/log-processor/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8002
+    environment:
+      AIRS_CONFIG_FILE: /app/config/airs.yaml
+    depends_on:
+      kafka:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  anomaly-service:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.python
+    container_name: airs-anomaly-service
+    restart: unless-stopped
+    working_dir: /app/services/anomaly-service/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8003
+    environment:
+      AIRS_CONFIG_FILE: /app/config/airs.yaml
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  correlation-service:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.python
+    container_name: airs-correlation-service
+    restart: unless-stopped
+    working_dir: /app/services/correlation-service/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8004
+    environment:
+      AIRS_CONFIG_FILE: /app/config/airs.yaml
+    depends_on:
+      kafka:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  ai-service:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.python
+    container_name: airs-ai-service
+    restart: unless-stopped
+    working_dir: /app/services/ai-service/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8005
+    environment:
+      AIRS_CONFIG_FILE: /app/config/airs.yaml
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "8005:8005"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.python
+    container_name: airs-api-gateway
+    restart: unless-stopped
+    working_dir: /app/services/api-gateway/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    environment:
+      AIRS_CONFIG_FILE: /app/config/airs.yaml
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─────────────────────────────────────────────────────────────
+  # Observability
+  # ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: airs-prometheus
+    restart: unless-stopped
+    depends_on:
+      - api-gateway
+      - ingestion-service
+      - log-processor
+      - anomaly-service
+      - correlation-service
+      - ai-service
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: airs-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./infra/monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+
+  # ─────────────────────────────────────────────────────────────
+  # Frontend
+  # ─────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: airs-ui
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+volumes:
+  ollama-data:
