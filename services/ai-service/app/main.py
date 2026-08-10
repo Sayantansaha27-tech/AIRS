@@ -12,12 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from ai_providers import BaseLLMProvider, OllamaProvider, OpenAIProvider
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-from prometheus_client import Counter, Gauge, Histogram
-from redis import asyncio as redis_async
-
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import (
@@ -32,9 +28,11 @@ from airs_shared.monitoring import metrics_response
 from airs_shared.normalize import normalize_log
 from airs_shared.opensearch import build_client, ensure_index, upsert_doc
 from airs_shared.settings import AIRSSettings, get_settings
-
-from ai_providers import BaseLLMProvider, OllamaProvider, OpenAIProvider
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Gauge, Histogram
 from rca import build_prompt, deterministic_fallback, heuristic_confidence
+from redis import asyncio as redis_async
 
 settings = get_settings()
 app = FastAPI(title="AIRS AI Service")
@@ -276,7 +274,7 @@ def fetch_recent_incidents(
                 ],
                 "minimum_should_match": 1,
             }
-        }
+        },
     ]
 
     query: dict[str, Any] = {

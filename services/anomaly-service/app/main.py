@@ -13,10 +13,6 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from prometheus_client import Counter, Gauge, Histogram
-
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import (
@@ -30,6 +26,9 @@ from airs_shared.monitoring import metrics_response
 from airs_shared.normalize import normalize_log
 from airs_shared.opensearch import build_client, ensure_index
 from airs_shared.settings import get_settings
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Gauge, Histogram
 
 settings = get_settings()
 app = FastAPI(title="AIRS Anomaly Service")

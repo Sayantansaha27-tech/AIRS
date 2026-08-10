@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -33,7 +33,7 @@ def topic_contracts(settings: AIRSSettings) -> list[SchemaContract]:
     ]
 
 
-def contract_model_map(settings: AIRSSettings) -> dict[str, Type[BaseModel]]:
+def contract_model_map(settings: AIRSSettings) -> dict[str, type[BaseModel]]:
     return {
         settings.kafka.topics.logs: NormalizedLogEvent,
         settings.kafka.topics.processed_logs: NormalizedLogEvent,

@@ -70,7 +70,10 @@ def deterministic_fallback(context: dict) -> RCAResult:
         root_cause=summary,
         confidence=heuristic_confidence(context),
         explanation=explanation,
-        suggested_fix="Check recent deployment/config changes, inspect dependency timeouts, and restart affected pods if needed.",
+        suggested_fix=(
+            "Check recent deployment/config changes, inspect dependency timeouts, "
+            "and restart affected pods if needed."
+        ),
         affected_services=services or [service],
         evidence=evidence,
     )

@@ -10,16 +10,15 @@ from time import perf_counter
 from typing import Any
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from prometheus_client import Counter, Gauge, Histogram
-
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import AnomalyEvent, DataSource, Incident, Severity
 from airs_shared.monitoring import metrics_response
 from airs_shared.opensearch import build_client, ensure_index, ensure_retention_policy, upsert_doc
 from airs_shared.settings import get_settings
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Gauge, Histogram
 
 settings = get_settings()
 app = FastAPI(title="AIRS Correlation Service")
@@ -87,9 +86,7 @@ def pick_severity(anomalies: list[AnomalyEvent]) -> Severity:
 
 def cluster_summary(service: str, anomalies: list[AnomalyEvent]) -> str:
     top_reason = (
-        anomalies[-1].reasons[0]
-        if anomalies and anomalies[-1].reasons
-        else "correlated anomalies"
+        anomalies[-1].reasons[0] if anomalies and anomalies[-1].reasons else "correlated anomalies"
     )
     return f"{service} incident from {len(anomalies)} correlated anomalies ({top_reason})"
 

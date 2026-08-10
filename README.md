@@ -449,6 +449,7 @@ Adding a new LLM provider is a single-file change:
 
 from ai_providers.base import BaseLLMProvider
 
+
 class MyProvider(BaseLLMProvider):
     async def generate(self, prompt: str, context: dict) -> dict:
         # Call your model API here.

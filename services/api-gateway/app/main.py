@@ -7,15 +7,16 @@ import hashlib
 import hmac
 import json
 import re
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any, AsyncIterator, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 from airs_shared.kafka import produce_json
-from airs_shared.monitoring import metrics_response
 from airs_shared.models import (
+    DEFAULT_TENANT_ID,
     AnalyzeRequest,
     ChatOpsCommandRequest,
     ChatOpsConfig,
@@ -23,7 +24,6 @@ from airs_shared.models import (
     DataSource,
     DataSourceCreateRequest,
     DataSourceView,
-    DEFAULT_TENANT_ID,
     DetectionRule,
     DetectionRuleCreateRequest,
     IncidentStatus,
@@ -40,6 +40,7 @@ from airs_shared.models import (
     TopologyUpdateRequest,
     normalize_tenant,
 )
+from airs_shared.monitoring import metrics_response
 from airs_shared.opensearch import build_client, ensure_index, upsert_doc
 from airs_shared.schema_registry import topic_contracts
 from airs_shared.settings import get_settings
@@ -1405,11 +1406,7 @@ async def list_suppressions(
     items = list_suppressions_internal(tenant_id)
     if active_only:
         now = datetime.now(UTC)
-        items = [
-            item
-            for item in items
-            if item.enabled and item.starts_at <= now <= item.ends_at
-        ]
+        items = [item for item in items if item.enabled and item.starts_at <= now <= item.ends_at]
     return {
         "items": [item.model_dump(mode="json") for item in items],
         "total": len(items),
@@ -1710,7 +1707,9 @@ async def run_chatops_command(
         }
         result = os_client.search(index=settings.opensearch.incidents_index, body=query)
         hits = result.get("hits", {}).get("hits", [])
-        summary = ", ".join([f"{hit['_id']}:{hit['_source'].get('status')}" for hit in hits]) or "none"
+        summary = (
+            ", ".join([f"{hit['_id']}:{hit['_source'].get('status')}" for hit in hits]) or "none"
+        )
         text = f"Open incidents ({len(hits)}): {summary}"
         await deliver_chatops_message(
             tenant_id,
@@ -1718,7 +1717,11 @@ async def run_chatops_command(
             context={"action": "status", "service": argument, "count": len(hits)},
         )
         CHATOPS_COMMANDS_TOTAL.labels(tenant_id=tenant_id, action=action, status="ok").inc()
-        return {"action": "status", "count": len(hits), "items": [{"id": h["_id"], **h["_source"]} for h in hits]}
+        return {
+            "action": "status",
+            "count": len(hits),
+            "items": [{"id": h["_id"], **h["_source"]} for h in hits],
+        }
 
     if action == "ack":
         if not argument:
@@ -1766,7 +1769,8 @@ async def run_chatops_command(
         assert_tenant_access(result["_source"], tenant_id)
         incident = {"id": result["_id"], **result["_source"]}
         rca = incident.get("rca")
-        text = f"RCA for {argument}: {rca.get('root_cause') if isinstance(rca, dict) else 'not ready'}"
+        root_cause = rca.get("root_cause") if isinstance(rca, dict) else "not ready"
+        text = f"RCA for {argument}: {root_cause}"
         await deliver_chatops_message(
             tenant_id,
             text,
@@ -1775,7 +1779,9 @@ async def run_chatops_command(
         CHATOPS_COMMANDS_TOTAL.labels(tenant_id=tenant_id, action=action, status="ok").inc()
         return {"action": action, "incident_id": argument, "rca": rca}
 
-    help_text = "Supported: /airs status [service], /airs ack <id>, /airs resolve <id>, /airs rca <id>"
+    help_text = (
+        "Supported: /airs status [service], /airs ack <id>, /airs resolve <id>, /airs rca <id>"
+    )
     await deliver_chatops_message(tenant_id, help_text, context={"action": "help"})
     CHATOPS_COMMANDS_TOTAL.labels(tenant_id=tenant_id, action="help", status="ok").inc()
     return {"action": "help", "message": help_text}
@@ -1847,7 +1853,9 @@ async def replay_filtered_logs(
     replay_docs: list[dict[str, Any]] = []
     for doc in docs:
         candidate = {**doc, "tenant_id": doc.get("tenant_id", tenant_id)}
-        if selected_rules and not any(detect_rule_match(rule, candidate) for rule in selected_rules):
+        if selected_rules and not any(
+            detect_rule_match(rule, candidate) for rule in selected_rules
+        ):
             continue
         replay_docs.append(candidate)
 

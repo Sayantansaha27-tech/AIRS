@@ -28,11 +28,13 @@ def normalize_log(raw: dict[str, Any] | str) -> NormalizedLogEvent:
         for k, v in raw.items()
         if k not in {"timestamp", "service", "level", "message", "tenant_id"}
     }
-    return NormalizedLogEvent(
-        timestamp=timestamp,
-        service=service,
-        level=level,
-        message=message,
-        tenant_id=tenant_id,
-        metadata=metadata,
+    return NormalizedLogEvent.model_validate(
+        {
+            "timestamp": timestamp,
+            "service": service,
+            "level": level,
+            "message": message,
+            "tenant_id": tenant_id,
+            "metadata": metadata,
+        }
     )
