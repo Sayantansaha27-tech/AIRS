@@ -30,8 +30,8 @@ Thank you for your interest in contributing. This document explains how the proj
 ### Clone and install
 
 ```bash
-git clone https://github.com/your-org/airs.git
-cd airs
+git clone https://github.com/Sayantansaha27-tech/AIRS.git
+cd AIRS
 
 # Python (backend)
 pip install -r requirements.txt

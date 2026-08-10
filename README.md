@@ -2,7 +2,7 @@
 
 > **An event-driven, Kafka-native incident intelligence platform that ingests raw logs, detects anomalies, correlates them into incidents, and generates AI-powered Root Cause Analysis — all in real time, all locally runnable.**
 
-[![CI](https://github.com/your-org/airs/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/airs/actions/workflows/ci.yml)
+[![CI](https://github.com/Sayantansaha27-tech/AIRS/actions/workflows/ci.yml/badge.svg)](https://github.com/Sayantansaha27-tech/AIRS/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-compose-blue)](docker-compose.yml)
@@ -225,8 +225,8 @@ Generate with retries (8s timeout, 2 retries, exponential backoff)
 ### 1. Clone
 
 ```bash
-git clone https://github.com/your-org/airs.git
-cd airs
+git clone https://github.com/Sayantansaha27-tech/AIRS.git
+cd AIRS
 ```
 
 ### 2. Configure
