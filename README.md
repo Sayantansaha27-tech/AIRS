@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/your-org/airs/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/airs/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-compose-blue)](docker-compose.yml)
 
 ---
@@ -644,4 +644,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style, and t
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, and deploy. Attribution appreciated.
+[Apache-2.0](LICENSE) — free to use, modify, and deploy, with an explicit patent grant. See [NOTICE](NOTICE) for attribution requirements.
