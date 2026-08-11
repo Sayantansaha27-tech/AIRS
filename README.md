@@ -320,7 +320,7 @@ stated, are in [`docs/06-evals.md`](docs/06-evals.md).
 | **AI / RCA** | Severity-based model routing, hybrid confidence scoring, deterministic fallback, RCA feedback capture |
 | **API** | REST CRUD, cursor pagination, SSE stream (2s poll), schema registry, audit log |
 | **Ops** | Prometheus metrics on all services, Grafana dashboards, log/incident retention policies |
-| **Multi-tenancy** | `tenant_id` on all pipeline entities, `x-tenant-id` header scoping |
+| **Multi-tenancy** | `tenant_id` on all pipeline entities, `x-tenant-id` header scoping (scaffolding, not a security boundary: [see below](#multi-tenancy-and-authentication)) |
 | **ChatOps** | Slack webhook integration, slash command handler |
 | **UI** | Dark-mode Next.js dashboard, incident list + detail, RCA panel, topology view, sources management |
 
@@ -643,15 +643,41 @@ airs_ai_batch_size
 
 ---
 
-## Multi-Tenancy
+## Multi-Tenancy and authentication
 
-AIRS includes multi-tenant groundwork:
+**There is no authentication in AIRS.** No API keys, no tokens, no middleware,
+no per-route guards. Every endpoint on the API gateway is open to anyone who
+can reach the port. This is a local-first demonstration system, and it should
+not be exposed to a network you do not control.
 
-- All pipeline entities (`NormalizedLogEvent`, `AnomalyEvent`, `Incident`) carry `tenant_id` (default: `"default"`)
-- API Gateway accepts `x-tenant-id` header to scope all queries
-- OpenSearch queries filter by `tenant_id` in all service paths
+Multi-tenancy is **schema-level scaffolding**, and it is worth being exact
+about what that does and does not give you:
 
-This means the schema and infrastructure are ready for a multi-tenant SaaS deployment — you only need to add authentication middleware and per-tenant Kafka consumer groups.
+What exists:
+
+- All pipeline entities (`NormalizedLogEvent`, `AnomalyEvent`, `Incident`)
+  carry `tenant_id`, defaulting to `"default"`
+- The API gateway reads an `x-tenant-id` header and scopes queries by it
+- OpenSearch queries filter on `tenant_id` across every service path
+- Anomaly detection baselines, detection rules and suppression windows are
+  all keyed per tenant, so tenants do not pollute each other's signal
+
+What that is not:
+
+- **`tenant_id` is not a security boundary.** It is an unverified request
+  header. With no authentication behind it, any caller reads or mutates any
+  tenant's incidents by changing one header value. It separates tenants from
+  each other's *noise*, not from each other's *data*.
+- **Tenants share pipeline capacity.** There is one Kafka consumer group per
+  service for all tenants, so one tenant's log storm consumes another
+  tenant's throughput. There is no per-tenant quota or rate limit.
+- **Tenants share indices.** Retention, mapping and reindexing are global
+  operations, so per-tenant retention policy is not expressible today.
+
+Getting from here to a multi-tenant SaaS deployment means adding
+authentication that establishes tenant identity, deriving `tenant_id` from
+that identity rather than from a header, and then partitioning capacity. The
+schema work is genuinely done. The boundary work has not been started.
 
 ---
 
