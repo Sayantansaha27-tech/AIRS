@@ -1,4 +1,4 @@
-# AIRS — AI Incident Response System
+# AIRS: AI Incident Response System
 
 > **An event-driven, Kafka-native incident intelligence platform that ingests raw logs, detects anomalies, correlates them into incidents, and generates AI-powered Root Cause Analysis. Streaming end to end, and fully runnable on one machine.**
 
@@ -13,14 +13,14 @@
 
 ### The problem every systems builder has hit
 
-You're running a fleet of services. Something breaks at 2 AM. You open Grafana and see a spike. You open Kibana and see 10,000 error lines. You open Slack and see five engineers all looking at different logs, each with a different theory. Forty minutes pass before anyone agrees on a root cause — a cascading timeout from a single DB pool exhaustion.
+You're running a fleet of services. Something breaks at 2 AM. You open Grafana and see a spike. You open Kibana and see 10,000 error lines. You open Slack and see five engineers all looking at different logs, each with a different theory. Forty minutes pass before anyone agrees on a root cause, a cascading timeout from a single DB pool exhaustion.
 
 **The raw material for diagnosing that incident was always there.** It was sitting in your logs. What was missing was a system that could:
 
 1. Watch all of it continuously
 2. Know what "anomalous" means for each service
 3. Group related signals before the noise drowns them
-4. Reason about root causes the way a senior engineer would — but at machine speed
+4. Reason about root causes the way a senior engineer would, but at machine speed
 
 AIRS is that system.
 
@@ -49,7 +49,7 @@ Kafka: anomalies-topic
    ▼  correlation-service (time-window + dedup)
 Kafka: incidents-topic
    │
-   ▼  ai-service (RCA generation — Ollama or OpenAI)
+   ▼  ai-service (RCA generation: Ollama or OpenAI)
 OpenSearch: airs-incidents
    │
    ▼  api-gateway (REST + SSE + ChatOps)
@@ -62,7 +62,7 @@ This means:
 - **Every stage fails and lags independently.** The anomaly detector can lag without blocking ingestion. The AI service can be slow without stalling correlation. Each stage is its own consumer group, so backpressure at one does not propagate upstream. Note this is isolation, not horizontal scale: anomaly-service and correlation-service both hold per-service state in memory, so running two replicas of either splits that state rather than sharing it. Scaling those two needs the state moved out first.
 - **The AI is opt-out, not opt-in.** Incidents always exist. RCA is async enrichment on top of them. A model timeout never breaks your incident pipeline.
 - **You own the data.** Default setup is fully local: Kafka, OpenSearch, and Ollama running in Docker. No data leaves your machine unless you choose OpenAI mode.
-- **The provider is a runtime detail.** Swap Ollama for OpenAI — or back — with a single API call. No restarts required.
+- **The provider is a runtime detail.** Swap Ollama for OpenAI (or back) with a single API call. No restarts required.
 
 The result is a system that is simultaneously **operationally boring** (Kafka + OpenSearch are battle-tested infrastructure) and **analytically powerful** (LLM reasoning applied at exactly the right place in the pipeline).
 
@@ -74,7 +74,7 @@ The result is a system that is simultaneously **operationally boring** (Kafka + 
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    AIRS — AI Incident Response System                       │
+│                    AIRS: AI Incident Response System                        │
 │                                                                             │
 │  External APIs  ─┐                                                          │
 │  Log Agents     ─┤──▶  Ingestion Service ──▶  Kafka: logs-topic            │
@@ -354,7 +354,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-All services start with health-gated dependency ordering — the pipeline will not start consuming until Kafka, OpenSearch, Redis, and Ollama are healthy.
+All services start with health-gated dependency ordering: the pipeline will not start consuming until Kafka, OpenSearch, Redis, and Ollama are healthy.
 
 ### 4. Pull LLM models (first run only)
 
@@ -367,12 +367,12 @@ docker exec -it airs-ollama ollama pull rjmalagon/qwen2:1.5b-instruct
 
 | Service | URL | Credentials |
 | --- | --- | --- |
-| Dashboard UI | <http://localhost:3000> | — |
-| API Gateway | <http://localhost:8000> | — |
+| Dashboard UI | <http://localhost:3000> | none |
+| API Gateway | <http://localhost:8000> | none |
 | Grafana | <http://localhost:3001> | admin / admin |
-| Prometheus | <http://localhost:9090> | — |
-| OpenSearch | <http://localhost:9200> | — |
-| Ollama | <http://localhost:11434> | — |
+| Prometheus | <http://localhost:9090> | none |
+| OpenSearch | <http://localhost:9200> | none |
+| Ollama | <http://localhost:11434> | none |
 
 ---
 
@@ -416,7 +416,7 @@ curl -X POST http://localhost:8000/v1/analyze \
         "timestamp": "2026-03-05T14:00:01Z",
         "service": "orders-service",
         "level": "critical",
-        "message": "OOM killer invoked — heap exhausted"
+        "message": "OOM killer invoked, heap exhausted"
       }
     ]
   }'
@@ -622,24 +622,32 @@ See [`docs/contracts.md`](docs/contracts.md) for full schema definitions. Summar
 
 Every service exposes `/metrics` in Prometheus format. The Grafana dashboard (auto-provisioned at startup) surfaces:
 
-- **Ingestion rate** — events/sec by service
-- **Anomaly rate** — anomalies/sec by severity
-- **Incident creation rate** — incidents/min
-- **RCA generation latency** — p50/p95/p99 histogram by model
-- **RCA success/failure ratio** — per service + severity
-- **DLQ depth** — failures by source topic
-- **Consumer batch sizes** — Kafka consumer health
+- **Ingestion rate**, events/sec by service
+- **Anomaly rate**, anomalies/sec by severity
+- **Incident creation rate**, incidents/min
+- **RCA generation latency**, p50/p95/p99 histogram by model
+- **RCA path split** (model-generated vs deterministic fallback) per service and severity
+- **DLQ depth**, failures by source topic
+- **Consumer batch sizes**, Kafka consumer health
 
 Key Prometheus metrics:
 
 ```text
 airs_rca_generation_duration_seconds{model, severity}
-airs_rca_success_total{service, severity}
+airs_rca_success_total{service, severity, path}   # path = llm | deterministic
 airs_rca_failure_total{service, severity}
 airs_rca_routed_model_total{model, severity}
 airs_dlq_published_total{source_topic}
+airs_incidents_created_total{service, severity}
+airs_incidents_amended_total{service}
+airs_correlation_active_clusters
 airs_ai_batch_size
 ```
+
+The one to watch is `airs_rca_success_total{path="deterministic"}`. Every
+incident gets an RCA whether or not a model answered, so a rising fallback
+rate is the only signal that the AI path is degraded. A flat failure count
+alone will not tell you.
 
 ---
 
@@ -771,7 +779,7 @@ AIRS_CONFIG_FILE=config/airs.yaml PYTHONPATH=shared \
 
 ### Why Kafka instead of a message queue or direct HTTP?
 
-HTTP between services creates tight coupling and backpressure problems at scale. A message queue (RabbitMQ/SQS) would work but loses the replayability and topic compaction properties that make debugging incident pipelines tractable. Kafka gives us durable, ordered, replayable streams — and the DLQ pattern for free.
+HTTP between services creates tight coupling and backpressure problems at scale. A message queue (RabbitMQ/SQS) would work but loses the replayability and topic compaction properties that make debugging incident pipelines tractable. Kafka gives us durable, ordered, replayable streams, and the DLQ pattern for free.
 
 ### Why OpenSearch instead of Elasticsearch or Postgres?
 
@@ -779,7 +787,7 @@ Incident data is fundamentally document-oriented and time-series-heavy. Full-tex
 
 ### Why a deterministic RCA fallback?
 
-LLM calls fail. Models time out. API keys expire. A system that falls over silently when the AI is unavailable is worse than no AI at all. The deterministic fallback ensures every incident always has a machine-generated RCA — it may be less insightful, but it is always present and always consistent.
+LLM calls fail. Models time out. API keys expire. A system that falls over silently when the AI is unavailable is worse than no AI at all. The deterministic fallback ensures every incident always has a machine-generated RCA. It may be less insightful, but it is always present and always consistent.
 
 ### Why severity-based model routing?
 
@@ -799,4 +807,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style, and t
 
 ## License
 
-[Apache-2.0](LICENSE) — free to use, modify, and deploy, with an explicit patent grant. See [NOTICE](NOTICE) for attribution requirements.
+[Apache-2.0](LICENSE), free to use, modify, and deploy, with an explicit patent grant. See [NOTICE](NOTICE) for attribution requirements.

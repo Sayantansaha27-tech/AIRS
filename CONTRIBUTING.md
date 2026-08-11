@@ -123,7 +123,7 @@ pytest tests/test_models.py -v
 mypy shared
 ```
 
-There are currently no integration tests that require a live Kafka/OpenSearch cluster — all tests mock external dependencies.
+There are currently no integration tests that require a live Kafka/OpenSearch cluster; all tests mock external dependencies.
 
 ---
 
