@@ -66,7 +66,7 @@ VALID_LLM_PAYLOAD = {
     ("severity", "expected_model", "expected_use_llm"),
     [
         ("critical", "qwen2.5:7b-instruct", True),
-        ("warning", "rjmalagon/qwen2:1.5b-instruct", True),
+        ("warning", "qwen2.5:1.5b-instruct", True),
         ("info", "deterministic", False),
     ],
 )
@@ -156,7 +156,7 @@ async def test_falls_back_to_the_low_cost_tier_then_deterministic(ai, monkeypatc
     retries = ai.settings.llm.retries + 1
     assert len(provider.calls) == retries * 2, "primary tier then low-cost tier"
     assert provider.calls[0] == "qwen2.5:7b-instruct"
-    assert provider.calls[-1] == "rjmalagon/qwen2:1.5b-instruct"
+    assert provider.calls[-1] == "qwen2.5:1.5b-instruct"
 
 
 async def test_malformed_model_json_falls_through_to_deterministic(ai, monkeypatch):

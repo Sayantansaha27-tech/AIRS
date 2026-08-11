@@ -21,14 +21,63 @@ opensearch:
   sources_index: airs-sources
 
 llm:
+  # Which provider below to use. Change this one line to switch everything.
   provider: ollama
-  model: qwen2.5:7b-instruct
-  fallback_model: rjmalagon/qwen2:1.5b-instruct
   timeout_seconds: 8
   retries: 2
-  ollama_base_url: http://ollama:11434
-  openai_base_url: https://api.openai.com/v1
-  openai_api_key_env: OPENAI_API_KEY
+
+  # Severity to tier. "deterministic" skips the model entirely.
+  # Want the capable model on everything? Set warning and info to primary.
+  routing:
+    critical: primary
+    warning: economy
+    info: deterministic
+
+  # Each provider declares its own model for each tier, so switching provider
+  # moves both tiers together. `kind` picks the adapter that talks to it.
+  providers:
+    ollama:
+      kind: ollama
+      base_url: http://ollama:11434
+      models:
+        primary: qwen2.5:7b-instruct
+        economy: qwen2.5:1.5b-instruct
+
+    openai:
+      kind: openai_compatible
+      base_url: https://api.openai.com/v1
+      api_key_env: OPENAI_API_KEY
+      models:
+        primary: gpt-4.1
+        economy: gpt-4.1-mini
+
+    anthropic:
+      kind: anthropic
+      base_url: https://api.anthropic.com/v1
+      api_key_env: ANTHROPIC_API_KEY
+      models:
+        primary: claude-sonnet-5
+        economy: claude-haiku-4-5-20251001
+
+    # Anything speaking the OpenAI chat-completions API works with kind:
+    # openai_compatible and no code change. A few worked examples:
+
+    # groq:
+    #   kind: openai_compatible
+    #   base_url: https://api.groq.com/openai/v1
+    #   api_key_env: GROQ_API_KEY
+    #   models: {primary: llama-3.3-70b-versatile, economy: llama-3.1-8b-instant}
+
+    # openrouter:
+    #   kind: openai_compatible
+    #   base_url: https://openrouter.ai/api/v1
+    #   api_key_env: OPENROUTER_API_KEY
+    #   models: {primary: anthropic/claude-sonnet-4.5, economy: google/gemini-2.0-flash-001}
+
+    # vllm:                      # or LM Studio, llama.cpp server, TGI
+    #   kind: openai_compatible  # usually needs no api_key_env at all
+    #   base_url: http://localhost:8000/v1
+    #   models: {primary: meta-llama/Llama-3.3-70B-Instruct, economy: Qwen/Qwen2.5-7B-Instruct}
 
 pipeline:
   baseline_window_minutes: 15

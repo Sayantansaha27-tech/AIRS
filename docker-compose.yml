@@ -185,7 +185,12 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8005
     environment:
       AIRS_CONFIG_FILE: /app/config/airs.yaml
+      # Only the key for the selected llm.provider is used. Passing them all
+      # means switching provider is a config edit, not a compose edit.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     depends_on:
       kafka:
         condition: service_healthy
