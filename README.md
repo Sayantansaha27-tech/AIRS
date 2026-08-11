@@ -603,7 +603,37 @@ Query params for list: `page`, `size`, `severity`, `service`, `start_time`, `end
 
 ## LLM Provider Abstraction
 
-Adding a new LLM provider is a single-file change:
+**AIRS is model agnostic.** Provider and model live in `config/airs.yaml`, and
+anything speaking the OpenAI chat-completions API works with no code at all:
+OpenAI, vLLM, LM Studio, llama.cpp, Together, Groq, OpenRouter, DeepSeek,
+Mistral. Anthropic and Ollama have their own adapters because their APIs
+differ.
+
+Routing maps severity to a **tier**, and each provider says which of its models
+fills that tier, so switching provider moves every tier together:
+
+```yaml
+llm:
+  provider: ollama            # change this one line to switch
+  routing:
+    critical: primary
+    warning: economy
+    info: deterministic       # no model call at all
+  providers:
+    ollama:
+      kind: ollama
+      base_url: http://ollama:11434
+      models: {primary: qwen2.5:7b-instruct, economy: qwen2.5:1.5b-instruct}
+    groq:
+      kind: openai_compatible
+      base_url: https://api.groq.com/openai/v1
+      api_key_env: GROQ_API_KEY
+      models: {primary: llama-3.3-70b-versatile, economy: llama-3.1-8b-instant}
+```
+
+Full guide: [`docs/11-models.md`](docs/11-models.md).
+
+For an API shape none of the built-in adapters match, add one:
 
 ```python
 # services/ai-service/app/ai_providers/my_provider.py
@@ -617,7 +647,7 @@ class MyProvider(BaseLLMProvider):
         # Must return a dict matching the RCAResult schema:
         # {
         #   "root_cause": str,
-        #   "confidence": float (0–1),
+        #   "confidence": float (0 to 1),
         #   "explanation": str,
         #   "suggested_fix": str,
         #   "affected_services": list[str],
@@ -626,11 +656,29 @@ class MyProvider(BaseLLMProvider):
         ...
 ```
 
-Register it in `build_provider()` in `ai-service/app/main.py` and select it via:
+Register it against a `kind`, then reference that kind from config:
+
+```python
+from ai_providers import register
+
+register("my_api", lambda cfg, name, model, timeout: MyProvider(
+    base_url=cfg.base_url, model=model, timeout_seconds=timeout
+))
+```
+
+```yaml
+providers:
+  my-provider:
+    kind: my_api
+    base_url: https://my-endpoint/v1
+    models: {primary: big-model, economy: small-model}
+```
+
+Switch at runtime without a restart:
 
 ```bash
 curl -X POST http://localhost:8000/v1/llm/config \
-  -d '{"provider": "my_provider", "model": "my-model-name"}'
+  -d '{"provider": "my-provider", "model": "big-model"}'
 ```
 
 ---
@@ -858,6 +906,7 @@ If you only read two, read `01` and `05`.
 | [07: Runbook](docs/07-runbook.md) | Install, upgrade, rollback, backup, on-call triage |
 | [08: Handoff](docs/08-handoff.md) | Operating this without its author |
 | [09: Postmortem](docs/09-postmortem.md) | What would be done differently |
+| [11: Choosing a model](docs/11-models.md) | Provider and model selection, and how to add your own |
 
 ---
 
