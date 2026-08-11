@@ -95,7 +95,7 @@ The result is a system that is simultaneously **operationally boring** (Kafka + 
 │                               (airs-incidents)         │                      │
 │                                                       │                      │
 │                     Ollama ───▶  AI Service (8005) ◀──┘                     │
-│                  (or OpenAI)      │  Redis cache                             │
+│                  (or OpenAI)      │                                          │
 │                                   │                                          │
 │                                   ▼                                          │
 │                          API Gateway (8000)                                  │
@@ -123,6 +123,18 @@ incidents-topic ─────────────────────�
 airs-dlq-topic (dead letter queue for all failures) ◀─────┘──┘──┘──┘
 ```
 
+Every pipeline stage publishes to the DLQ when it cannot process an event:
+ingestion-service, log-processor, anomaly-service, correlation-service and
+ai-service. api-gateway has no DLQ path by design, because it is a synchronous
+REST surface that returns errors to its caller rather than parking them.
+
+**The DLQ is currently write-only.** Events land there with their source topic,
+partition, offset and failure reason, and `airs_dlq_published_total` makes the
+rate visible, but nothing consumes the topic and there is no drain or
+replay-from-DLQ tooling. `POST /v1/admin/replay` replays a topic and offset
+range, which is not the same thing. Draining is a manual operation today; see
+[`docs/07-runbook.md`](docs/07-runbook.md).
+
 ### Service dependency graph
 
 ```text
@@ -133,6 +145,11 @@ kafka ◀── correlation-service ◀── opensearch
 kafka ◀── ai-service ◀── redis, ollama, opensearch
 kafka ◀── api-gateway ◀── redis, ai-service, opensearch
 ```
+
+Redis is a startup and health dependency of ai-service and api-gateway, and
+both will report degraded without it, but **nothing reads or writes it yet**.
+It is provisioned ahead of the RCA cache and rate-limiting work, not currently
+serving either.
 
 ### Anomaly detection algorithm
 
@@ -229,7 +246,7 @@ Build context:
         ▼
 Route by severity:
   critical  ──▶  primary model (qwen2.5:7b-instruct)
-  warning   ──▶  fallback model (rjmalagon/qwen2:1.5b-instruct)
+  warning   ──▶  low-cost model (rjmalagon/qwen2:1.5b-instruct)
   info      ──▶  deterministic fallback (no LLM call)
         │
         ▼
@@ -239,9 +256,32 @@ Generate with retries (8s timeout, 2 retries, exponential backoff)
   │               (blend LLM confidence + heuristic score)
   │               upsert to OpenSearch
   │
-  └── all retries exhausted ──▶ deterministic fallback
-                                (keyword-based RCA, never fails)
+  ├── retries exhausted ──▶ retry once on the low-cost model
+  │
+  └── still failing, or provider unavailable
+                    ──▶ deterministic fallback
+                        (template RCA over the incident context)
 ```
+
+The routing tiers really do differ: `critical` gets a 7B model, `warning` a
+1.5B one, and `info` never calls a model at all. The low-cost tier only
+applies while the active provider is the one it was configured for; after a
+runtime switch to a different provider, `warning` follows the active model
+rather than asking that provider for a model name it does not have.
+
+**What the deterministic fallback does and does not buy you.** Every incident
+gets an RCA even with no model reachable, including when the provider is
+misconfigured. But the fallback is a template over the incident context, not
+an analysis: it names the service, counts the anomalies, quotes the top log
+lines and suggests generic remediation. It keeps the pipeline whole and the
+schema populated. It does not tell you what broke.
+
+It is also not free. With a model unreachable, an incident burns its full
+retry budget on both tiers before falling through, which at the default 8s
+timeout and 2 retries is roughly 54 seconds. The RCA consumer is sequential,
+so `incidents-topic` lag grows for as long as the outage lasts. The pipeline
+degrades rather than stalling, and `airs_rca_success_total{path="deterministic"}`
+is how you see it happening.
 
 ---
 
@@ -253,7 +293,7 @@ Generate with retries (8s timeout, 2 retries, exponential backoff)
 | **Processing** | Log normalization, OpenSearch indexing, dead-letter queue |
 | **Detection** | per-service seasonal (hour-of-day) EWMA baselines, z-score scoring, keyword scan, configurable detection rules per service |
 | **Correlation** | Time-window grouping per service, fingerprint deduplication, parent/child linking across a configured service graph |
-| **AI / RCA** | Severity-based model routing, hybrid confidence scoring, deterministic fallback, feedback loop |
+| **AI / RCA** | Severity-based model routing, hybrid confidence scoring, deterministic fallback, RCA feedback capture |
 | **API** | REST CRUD, cursor pagination, SSE stream, schema registry, audit log |
 | **Ops** | Prometheus metrics on all services, Grafana dashboards, log/incident retention policies |
 | **Multi-tenancy** | `tenant_id` on all pipeline entities, `x-tenant-id` header scoping |
