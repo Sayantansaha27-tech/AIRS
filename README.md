@@ -139,15 +139,37 @@ kafka ◀── api-gateway ◀── redis, ai-service, opensearch
 ```text
 For each processed log event:
 
-  1.  Fetch rolling baseline: last 15-minute error-rate window per service
-  2.  Compute z-score: (current_rate - baseline_mean) / baseline_stddev
-  3.  Apply keyword scan: ["error","exception","timeout","connection refused","oom","5xx"]
-  4.  Apply level check: level in {error, critical, fatal}
-  5.  Apply custom rules: service_pattern + regex/keyword match
-  6.  Compute anomaly_score = max(zscore, keyword_hit * 2.5)
-  7.  Compute confidence_score = f(zscore, keyword_hits, rule_boosts)
-  8.  If anomaly_score >= threshold (default 2.5) → emit to anomalies-topic
+  1.  Drop the event if an active suppression window matches its service
+  2.  Update the per-(tenant, service) seasonal baseline:
+      an EWMA of per-minute event counts held in 24 hour-of-day slots,
+      alpha 0.3, tracking mean and variance together
+  3.  Compute z-score against the slot for this event's hour:
+      (current_minute_count - slot_mean) / sqrt(slot_variance)
+      Undefined until that hour-of-day slot has been observed before
+  4.  Apply keyword scan: ["error","exception","timeout","connection refused","oom","5xx"]
+  5.  Apply level check: level in {error, critical, fatal}
+  6.  Apply custom rules: service_pattern + keyword/regex/threshold/composite
+  7.  Emit if ANY of: a rule matched, a keyword matched,
+      level is error/critical/fatal, or z-score >= anomaly_threshold (2.5)
+  8.  Compute confidence_score = f(zscore, keyword count, level, rule boosts)
+      Drop if confidence < 0.3 and no rule matched
+  9.  anomaly_score = max(zscore, 0.0)
+ 10.  Severity from level, z-score and critical markers,
+      raised to the highest severity among any matching rules
 ```
+
+Three things worth being precise about, because they are easy to overstate:
+
+- **The baseline is a volume baseline, not an error-rate baseline.** It counts
+  every log event for a service, so it detects a change in traffic shape. A
+  service that doubles its info-level chatter registers as anomalous.
+- **The z-score is not the primary trigger.** Step 7 is a disjunction, so in
+  normal operation the keyword and level gates fire far more often than the
+  threshold does. `anomaly_threshold` widens the net; it does not gate it.
+- **Baselines are in-memory, per process.** They are lost on restart and are
+  not shared between replicas, so running two anomaly-service instances gives
+  each a partial view and neither the full one. See
+  [`docs/05-failure-modes.md`](docs/05-failure-modes.md).
 
 ### Correlation algorithm
 
@@ -203,7 +225,7 @@ Generate with retries (8s timeout, 2 retries, exponential backoff)
 | --- | --- |
 | **Ingestion** | HTTP POST endpoint, external API polling, synthetic load simulation |
 | **Processing** | Log normalization, OpenSearch indexing, dead-letter queue |
-| **Detection** | z-score anomaly scoring, keyword scan, configurable detection rules per service |
+| **Detection** | per-service seasonal (hour-of-day) EWMA baselines, z-score scoring, keyword scan, configurable detection rules per service |
 | **Correlation** | Time-window grouping, fingerprint deduplication, suppression windows |
 | **AI / RCA** | Severity-based model routing, hybrid confidence scoring, deterministic fallback, feedback loop |
 | **API** | REST CRUD, cursor pagination, SSE stream, schema registry, audit log |
