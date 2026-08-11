@@ -170,13 +170,13 @@ async def test_a_replayed_anomaly_does_not_open_a_second_incident(
     grouped into the first.
     """
     corr = correlation_with_state
-    monkeypatch.setattr(
-        corr,
-        "get_service_config",
-        lambda t, s: corr.ServiceCorrelationConfig(
+
+    async def _get(tenant_id, service):
+        return corr.ServiceCorrelationConfig(
             window_duration_minutes=10, min_signal_count=2, fetched_at=datetime.now(UTC)
-        ),
-    )
+        )
+
+    monkeypatch.setattr(corr, "get_service_config", _get)
 
     event = anomaly("anomaly-1")
     await corr.process_anomaly(event)
@@ -193,13 +193,13 @@ async def test_replayed_anomalies_are_counted_not_silently_dropped(
     correlation_with_state, monkeypatch
 ):
     corr = correlation_with_state
-    monkeypatch.setattr(
-        corr,
-        "get_service_config",
-        lambda t, s: corr.ServiceCorrelationConfig(
+
+    async def _get(tenant_id, service):
+        return corr.ServiceCorrelationConfig(
             window_duration_minutes=10, min_signal_count=2, fetched_at=datetime.now(UTC)
-        ),
-    )
+        )
+
+    monkeypatch.setattr(corr, "get_service_config", _get)
 
     event = anomaly("anomaly-2")
     await corr.process_anomaly(event)
@@ -211,13 +211,13 @@ async def test_distinct_anomalies_are_still_processed(
 ):
     """Idempotency must not swallow genuinely new signal."""
     corr = correlation_with_state
-    monkeypatch.setattr(
-        corr,
-        "get_service_config",
-        lambda t, s: corr.ServiceCorrelationConfig(
+
+    async def _get(tenant_id, service):
+        return corr.ServiceCorrelationConfig(
             window_duration_minutes=10, min_signal_count=2, fetched_at=datetime.now(UTC)
-        ),
-    )
+        )
+
+    monkeypatch.setattr(corr, "get_service_config", _get)
 
     await corr.process_anomaly(anomaly("a1", fingerprint="f1", offset=0))
     await corr.process_anomaly(anomaly("a2", fingerprint="f2", offset=1))

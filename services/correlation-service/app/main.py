@@ -16,7 +16,12 @@ from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import AnomalyEvent, DataSource, Incident, Severity
 from airs_shared.monitoring import metrics_response
-from airs_shared.opensearch import build_client, ensure_index, ensure_retention_policy, upsert_doc
+from airs_shared.opensearch import (
+    async_ensure_index,
+    build_async_client,
+    build_client,
+    ensure_retention_policy,
+)
 from airs_shared.settings import get_settings
 from airs_shared.state import StateStore, build_state_store
 from fastapi import FastAPI
@@ -64,6 +69,7 @@ state: StateStore | None = None
 service_config_cache: dict[tuple[str, str], ServiceCorrelationConfig] = {}
 
 os_client = build_client(settings.opensearch.url)
+os_async = build_async_client(settings.opensearch.url)
 SOURCE_CONFIG_CACHE_TTL_SECONDS = 60
 TOPOLOGY_INDEX = "airs-topology"
 INCIDENTS_CREATED_TOTAL = Counter(
@@ -127,7 +133,7 @@ def tenant_scope_filter(tenant_id: str) -> dict[str, Any]:
     return {"term": {"tenant_id": tenant_id}}
 
 
-def get_service_config(tenant_id: str, service: str) -> ServiceCorrelationConfig:
+async def get_service_config(tenant_id: str, service: str) -> ServiceCorrelationConfig:
     now = datetime.now(UTC)
     cache_key = (tenant_id, service)
     cached = service_config_cache.get(cache_key)
@@ -158,7 +164,7 @@ def get_service_config(tenant_id: str, service: str) -> ServiceCorrelationConfig
         "sort": [{"updated_at": {"order": "desc"}}],
     }
     try:
-        result = os_client.search(index=settings.opensearch.sources_index, body=query)
+        result = await os_async.search(index=settings.opensearch.sources_index, body=query)
         hits = result.get("hits", {}).get("hits", [])
         if hits:
             source = DataSource.model_validate({"id": hits[0]["_id"], **hits[0]["_source"]})
@@ -171,7 +177,7 @@ def get_service_config(tenant_id: str, service: str) -> ServiceCorrelationConfig
     return config
 
 
-def fetch_topology_neighbors(tenant_id: str, service: str) -> set[str]:
+async def fetch_topology_neighbors(tenant_id: str, service: str) -> set[str]:
     query = {
         "query": {
             "bool": {
@@ -189,7 +195,7 @@ def fetch_topology_neighbors(tenant_id: str, service: str) -> set[str]:
     }
 
     try:
-        result = os_client.search(index=TOPOLOGY_INDEX, body=query)
+        result = await os_async.search(index=TOPOLOGY_INDEX, body=query)
     except Exception:  # noqa: BLE001
         return set()
 
@@ -206,7 +212,7 @@ def fetch_topology_neighbors(tenant_id: str, service: str) -> set[str]:
     return neighbors
 
 
-def find_parent_incident(
+async def find_parent_incident(
     *,
     tenant_id: str,
     service: str,
@@ -239,7 +245,7 @@ def find_parent_incident(
     }
 
     try:
-        result = os_client.search(index=settings.opensearch.incidents_index, body=query)
+        result = await os_async.search(index=settings.opensearch.incidents_index, body=query)
     except Exception:  # noqa: BLE001
         return None
 
@@ -271,14 +277,14 @@ async def emit_incident(cluster: IncidentCluster, *, publish: bool = True) -> No
         for item in sorted(cluster.anomalies, key=lambda x: x.timestamp)
     ]
 
-    related_services = fetch_topology_neighbors(cluster.tenant_id, cluster.service)
+    related_services = await fetch_topology_neighbors(cluster.tenant_id, cluster.service)
 
     first_emit = cluster.incident_id is None
     parent_hit = None
     if first_emit:
         # An incident's parent is decided once, when it opens. Re-resolving it on
         # every amendment would let the causal link flap as neighbours churn.
-        parent_hit = find_parent_incident(
+        parent_hit = await find_parent_incident(
             tenant_id=cluster.tenant_id,
             service=cluster.service,
             related_services=related_services,
@@ -303,7 +309,7 @@ async def emit_incident(cluster: IncidentCluster, *, publish: bool = True) -> No
     cluster.incident_id = incident.id
 
     payload = incident.model_dump(mode="json")
-    upsert_doc(os_client, settings.opensearch.incidents_index, incident.id, payload)
+    await os_async.index(index=settings.opensearch.incidents_index, id=incident.id, body=payload)
 
     if parent_hit is not None:
         parent_source = parent_hit.get("_source", {})
@@ -316,11 +322,10 @@ async def emit_incident(cluster: IncidentCluster, *, publish: bool = True) -> No
         parent_source["child_incident_ids"] = sorted(existing_children)
         parent_source["related_services"] = sorted(existing_related)
         parent_source["updated_at"] = datetime.now(UTC).isoformat()
-        upsert_doc(
-            os_client,
-            settings.opensearch.incidents_index,
-            parent_hit["_id"],
-            parent_source,
+        await os_async.index(
+            index=settings.opensearch.incidents_index,
+            id=parent_hit["_id"],
+            body=parent_source,
         )
 
     if publish:
@@ -384,7 +389,7 @@ async def process_anomaly(anomaly: AnomalyEvent) -> None:
         return
 
     received_at = datetime.now(UTC)
-    config = get_service_config(anomaly.tenant_id, anomaly.service)
+    config = await get_service_config(anomaly.tenant_id, anomaly.service)
     cluster_key = (anomaly.tenant_id, anomaly.service)
     existing = clusters.get(cluster_key)
 
@@ -513,8 +518,8 @@ async def startup() -> None:
 
     state = await build_state_store(settings.redis.url, namespace="airs-correlation")
 
-    ensure_index(os_client, settings.opensearch.incidents_index)
-    ensure_index(os_client, TOPOLOGY_INDEX)
+    await async_ensure_index(os_async, settings.opensearch.incidents_index)
+    await async_ensure_index(os_async, TOPOLOGY_INDEX)
     ensure_retention_policy(
         os_client,
         index_name=settings.opensearch.incidents_index,
@@ -552,6 +557,7 @@ async def shutdown() -> None:
         await producer.stop()
     if state is not None:
         await state.aclose()
+    await os_async.close()
 
 
 @app.get("/health")

@@ -134,10 +134,28 @@ def correlation(producer: ProducerSpy, monkeypatch: pytest.MonkeyPatch):
     module.producer = producer
     module.clusters.clear()
     module.service_config_cache.clear()
+
     # Isolate the correlation logic from OpenSearch-backed enrichment.
-    monkeypatch.setattr(module, "upsert_doc", lambda *a, **k: None)
-    monkeypatch.setattr(module, "fetch_topology_neighbors", lambda t, s: set())
-    monkeypatch.setattr(module, "find_parent_incident", lambda **k: None)
+    # These are async now, so the stubs must be too.
+    async def _no_neighbours(tenant_id, service):
+        return set()
+
+    async def _no_parent(**kwargs):
+        return None
+
+    class _NoopIndex:
+        async def index(self, **kwargs):
+            return None
+
+        async def search(self, **kwargs):
+            return {"hits": {"hits": []}}
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(module, "os_async", _NoopIndex())
+    monkeypatch.setattr(module, "fetch_topology_neighbors", _no_neighbours)
+    monkeypatch.setattr(module, "find_parent_incident", _no_parent)
     yield module
     module.producer = None
     module.clusters.clear()
