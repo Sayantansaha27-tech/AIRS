@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 from aiokafka import AIOKafkaProducer
+from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import DataSource, IngestRequest, SourceMethod
 from airs_shared.monitoring import metrics_response
@@ -48,6 +49,11 @@ SOURCE_POLLS_TOTAL = Counter(
     "Count of external source poll attempts",
     labelnames=("status",),
 )
+DLQ_PUBLISHED_TOTAL = Counter(
+    "airs_dlq_published_total",
+    "Count of DLQ events published by source topic",
+    labelnames=("source_topic",),
+)
 
 
 def payload_size(raw: dict[str, Any] | str) -> int:
@@ -84,6 +90,36 @@ def apply_default_service(
     return {**raw, "service": default_service, "tenant_id": normalized_tenant}
 
 
+async def publish_to_dlq(
+    *,
+    payload: dict[str, Any] | str,
+    error: Exception,
+    ingest_source: str,
+) -> None:
+    """Park a log that could not be normalized or published.
+
+    Ingestion is the head of the pipeline, so there is no upstream partition or
+    offset to record. The DLQ entry is keyed on the topic the event failed to
+    reach, and carries the ingest channel that produced it.
+    """
+    if producer is None:
+        return
+    body = payload if isinstance(payload, dict) else {"raw": payload}
+    await produce_json(
+        producer,
+        settings.kafka.topics.dlq,
+        {
+            **build_dlq_payload(
+                source_topic=settings.kafka.topics.logs,
+                payload=body,
+                error=error,
+            ),
+            "ingest_source": ingest_source,
+        },
+    )
+    DLQ_PUBLISHED_TOTAL.labels(source_topic=settings.kafka.topics.logs).inc()
+
+
 async def ingest_one(
     raw: dict[str, Any] | str,
     default_service: str | None = None,
@@ -98,14 +134,27 @@ async def ingest_one(
     candidate = apply_default_service(raw, default_service, tenant_id)
     if payload_size(candidate) > settings.pipeline.max_log_payload_kb * 1024:
         LOGS_REJECTED_TOTAL.labels(source=source, reason="payload_too_large").inc()
+        await publish_to_dlq(
+            payload=candidate,
+            error=ValueError("payload exceeds max_log_payload_kb"),
+            ingest_source=source,
+        )
         return False
 
-    normalized = normalize_log(candidate)
-    await produce_json(
-        producer,
-        settings.kafka.topics.logs,
-        normalized.model_dump(mode="json"),
-    )
+    try:
+        normalized = normalize_log(candidate)
+        await produce_json(
+            producer,
+            settings.kafka.topics.logs,
+            normalized.model_dump(mode="json"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A single malformed event must not abandon the rest of the batch.
+        logger.warning("Rejecting unprocessable log event: %s", exc)
+        LOGS_REJECTED_TOTAL.labels(source=source, reason="unprocessable").inc()
+        await publish_to_dlq(payload=candidate, error=exc, ingest_source=source)
+        return False
+
     LOGS_INGESTED_TOTAL.labels(source=source, service=normalized.service).inc()
     INGEST_DURATION_SECONDS.labels(source=source).observe(perf_counter() - started_at)
     return True
