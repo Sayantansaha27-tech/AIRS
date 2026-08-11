@@ -94,6 +94,9 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      # startup() calls ensure_index() against OpenSearch before serving.
+      opensearch:
+        condition: service_healthy
     ports:
       - "8001:8001"
     healthcheck:
@@ -137,6 +140,9 @@ services:
       AIRS_CONFIG_FILE: /app/config/airs.yaml
     depends_on:
       kafka:
+        condition: service_healthy
+      # startup() calls ensure_index() for the rules and suppressions indices.
+      opensearch:
         condition: service_healthy
     ports:
       - "8003:8003"

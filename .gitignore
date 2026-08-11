@@ -71,3 +71,5 @@ opensearch-data/
 
 # Ollama local model cache
 ollama-data/
+
+.venv/
