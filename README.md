@@ -661,9 +661,12 @@ Register it against a `kind`, then reference that kind from config:
 ```python
 from ai_providers import register
 
-register("my_api", lambda cfg, name, model, timeout: MyProvider(
-    base_url=cfg.base_url, model=model, timeout_seconds=timeout
-))
+register(
+    "my_api",
+    lambda cfg, name, model, timeout: MyProvider(
+        base_url=cfg.base_url, model=model, timeout_seconds=timeout
+    ),
+)
 ```
 
 ```yaml
