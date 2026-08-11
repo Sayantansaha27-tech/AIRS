@@ -145,6 +145,20 @@ def tenant_scope_filter(tenant_id: str) -> dict[str, Any]:
     return {"term": {"tenant_id": tenant_id}}
 
 
+def cheaper_model_for(active: RuntimeLLMConfig) -> str:
+    """The lower-cost tier for the provider that is currently active.
+
+    settings.llm.fallback_model names an Ollama model. Using it verbatim after a
+    runtime switch to OpenAI would send an Ollama model name to the OpenAI API,
+    so it only applies while the active provider is the one it was configured
+    for. For any other provider, staying on the active model is correct: the
+    routing decision that still holds is the deterministic tier below.
+    """
+    if active.provider == settings.llm.provider:
+        return settings.llm.fallback_model
+    return active.model
+
+
 def select_model_for_context(context: dict[str, Any], active: RuntimeLLMConfig) -> tuple[str, bool]:
     force_model = context.get("force_model")
     if isinstance(force_model, str) and force_model.strip():
@@ -154,7 +168,7 @@ def select_model_for_context(context: dict[str, Any], active: RuntimeLLMConfig) 
     if severity == "critical":
         return active.model, True
     if severity == "warning":
-        return settings.llm.fallback_model, True
+        return cheaper_model_for(active), True
 
     # Low-severity contexts default to deterministic fallback for latency/cost control.
     return "deterministic", False
