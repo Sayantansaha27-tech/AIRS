@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.dlq import build_dlq_payload
@@ -36,6 +37,14 @@ class IncidentCluster:
     min_signal_count: int
     anomalies: list[AnomalyEvent] = field(default_factory=list)
     fingerprints: set[str] = field(default_factory=set)
+    # Set once the cluster has produced an incident. The cluster stays resident
+    # for the rest of its window so that later anomalies for the same service
+    # deduplicate against it and amend that incident instead of opening a new
+    # one for every signal.
+    incident_id: str | None = None
+    created_at: datetime | None = None
+    parent_incident_id: str | None = None
+    emitted_severity: Severity | None = None
 
 
 @dataclass
@@ -58,6 +67,11 @@ INCIDENTS_CREATED_TOTAL = Counter(
     "airs_incidents_created_total",
     "Count of created incidents",
     labelnames=("service", "severity"),
+)
+INCIDENTS_AMENDED_TOTAL = Counter(
+    "airs_incidents_amended_total",
+    "Count of amendments applied to already-open incidents",
+    labelnames=("service",),
 )
 CORRELATION_PROCESSING_DURATION_SECONDS = Histogram(
     "airs_correlation_processing_duration_seconds",
@@ -227,7 +241,15 @@ def find_parent_incident(
     return hits[0]
 
 
-async def emit_incident(cluster: IncidentCluster) -> None:
+async def emit_incident(cluster: IncidentCluster, *, publish: bool = True) -> None:
+    """Create or amend the incident for a cluster.
+
+    The first call mints an incident and records its id on the cluster. Later
+    calls amend that same incident in place. `publish` controls whether the
+    result is republished to incidents-topic: amendments that do not change
+    severity are persisted but not republished, so a long-running incident does
+    not trigger one RCA generation per correlated anomaly.
+    """
     if not cluster.anomalies or producer is None:
         return
 
@@ -242,23 +264,35 @@ async def emit_incident(cluster: IncidentCluster) -> None:
     ]
 
     related_services = fetch_topology_neighbors(cluster.tenant_id, cluster.service)
-    parent_hit = find_parent_incident(
-        tenant_id=cluster.tenant_id,
-        service=cluster.service,
-        related_services=related_services,
-    )
-    parent_id = parent_hit["_id"] if parent_hit is not None else None
 
+    first_emit = cluster.incident_id is None
+    parent_hit = None
+    if first_emit:
+        # An incident's parent is decided once, when it opens. Re-resolving it on
+        # every amendment would let the causal link flap as neighbours churn.
+        parent_hit = find_parent_incident(
+            tenant_id=cluster.tenant_id,
+            service=cluster.service,
+            related_services=related_services,
+        )
+        cluster.parent_incident_id = parent_hit["_id"] if parent_hit is not None else None
+        cluster.created_at = datetime.now(UTC)
+
+    severity = pick_severity(cluster.anomalies)
     incident = Incident(
-        severity=pick_severity(cluster.anomalies),
+        id=cluster.incident_id or str(uuid4()),
+        severity=severity,
         service=cluster.service,
         tenant_id=cluster.tenant_id,
+        created_at=cluster.created_at or datetime.now(UTC),
+        updated_at=datetime.now(UTC),
         anomaly_ids=[item.id for item in cluster.anomalies],
         timeline=timeline,
         summary=cluster_summary(cluster.service, cluster.anomalies),
-        parent_incident_id=parent_id,
+        parent_incident_id=cluster.parent_incident_id,
         related_services=sorted(related_services),
     )
+    cluster.incident_id = incident.id
 
     payload = incident.model_dump(mode="json")
     upsert_doc(os_client, settings.opensearch.incidents_index, incident.id, payload)
@@ -281,11 +315,18 @@ async def emit_incident(cluster: IncidentCluster) -> None:
             parent_source,
         )
 
-    await produce_json(producer, settings.kafka.topics.incidents, payload)
-    INCIDENTS_CREATED_TOTAL.labels(
-        service=incident.service,
-        severity=incident.severity.value,
-    ).inc()
+    if publish:
+        await produce_json(producer, settings.kafka.topics.incidents, payload)
+
+    if first_emit:
+        INCIDENTS_CREATED_TOTAL.labels(
+            service=incident.service,
+            severity=incident.severity.value,
+        ).inc()
+    else:
+        INCIDENTS_AMENDED_TOTAL.labels(service=incident.service).inc()
+
+    cluster.emitted_severity = severity
 
 
 def within_window(start: datetime, incoming: datetime, window_minutes: int) -> bool:
@@ -293,53 +334,46 @@ def within_window(start: datetime, incoming: datetime, window_minutes: int) -> b
     return incoming - start <= window
 
 
+def open_cluster(
+    anomaly: AnomalyEvent,
+    config: ServiceCorrelationConfig,
+    received_at: datetime,
+) -> IncidentCluster:
+    return IncidentCluster(
+        tenant_id=anomaly.tenant_id,
+        service=anomaly.service,
+        first_seen=anomaly.timestamp,
+        last_seen=anomaly.timestamp,
+        last_received_at=received_at,
+        window_duration_minutes=config.window_duration_minutes,
+        min_signal_count=config.min_signal_count,
+        anomalies=[anomaly],
+        fingerprints={anomaly.fingerprint},
+    )
+
+
 async def process_anomaly(anomaly: AnomalyEvent) -> None:
     received_at = datetime.now(UTC)
     config = get_service_config(anomaly.tenant_id, anomaly.service)
     cluster_key = (anomaly.tenant_id, anomaly.service)
     existing = clusters.get(cluster_key)
-    if existing is None:
-        cluster = IncidentCluster(
-            tenant_id=anomaly.tenant_id,
-            service=anomaly.service,
-            first_seen=anomaly.timestamp,
-            last_seen=anomaly.timestamp,
-            last_received_at=received_at,
-            window_duration_minutes=config.window_duration_minutes,
-            min_signal_count=config.min_signal_count,
-            anomalies=[anomaly],
-            fingerprints={anomaly.fingerprint},
-        )
-        clusters[cluster_key] = cluster
-        if anomaly.severity == Severity.critical:
-            await emit_incident(cluster)
-            clusters.pop(cluster_key, None)
-        return
 
-    if not within_window(
+    if existing is None or not within_window(
         existing.first_seen,
         anomaly.timestamp,
         existing.window_duration_minutes,
     ):
-        await emit_incident(existing)
-        cluster = IncidentCluster(
-            tenant_id=anomaly.tenant_id,
-            service=anomaly.service,
-            first_seen=anomaly.timestamp,
-            last_seen=anomaly.timestamp,
-            last_received_at=received_at,
-            window_duration_minutes=config.window_duration_minutes,
-            min_signal_count=config.min_signal_count,
-            anomalies=[anomaly],
-            fingerprints={anomaly.fingerprint},
-        )
-        clusters[cluster_key] = cluster
+        # The previous window is over. Close it out, then open a fresh cluster.
+        if existing is not None and existing.incident_id is None:
+            await emit_incident(existing)
+        cluster = clusters[cluster_key] = open_cluster(anomaly, config, received_at)
         if anomaly.severity == Severity.critical:
             await emit_incident(cluster)
-            clusters.pop(cluster_key, None)
         return
 
     if anomaly.fingerprint in existing.fingerprints:
+        # Repeat of a signal this incident already carries. Extend the window so a
+        # sustained storm keeps one incident open rather than opening thousands.
         existing.last_seen = anomaly.timestamp
         existing.last_received_at = received_at
         return
@@ -349,13 +383,19 @@ async def process_anomaly(anomaly: AnomalyEvent) -> None:
     existing.last_seen = anomaly.timestamp
     existing.last_received_at = received_at
 
+    if existing.incident_id is not None:
+        # Already open. Amend it, and only republish when severity escalates, so
+        # a growing incident does not cost one RCA generation per anomaly.
+        escalated = pick_severity(existing.anomalies) != existing.emitted_severity
+        await emit_incident(existing, publish=escalated)
+        return
+
     # Emit immediately for high-signal clusters instead of waiting for window expiry.
     if (
         anomaly.severity == Severity.critical
         or len(existing.anomalies) >= existing.min_signal_count
     ):
         await emit_incident(existing)
-        clusters.pop(cluster_key, None)
 
 
 async def flush_stale_clusters() -> None:
@@ -369,7 +409,11 @@ async def flush_stale_clusters() -> None:
 
     for cluster_key in stale_cluster_keys:
         cluster = clusters.pop(cluster_key)
-        await emit_incident(cluster)
+        if cluster.incident_id is None:
+            # Never reached min_signal_count. Emit it now that the window closed.
+            await emit_incident(cluster)
+        elif pick_severity(cluster.anomalies) != cluster.emitted_severity:
+            await emit_incident(cluster)
     ACTIVE_CLUSTERS.set(len(clusters))
 
 
@@ -465,7 +509,8 @@ async def shutdown() -> None:
             await worker_task
 
     for cluster in list(clusters.values()):
-        await emit_incident(cluster)
+        if cluster.incident_id is None:
+            await emit_incident(cluster)
     clusters.clear()
 
     if consumer is not None:
