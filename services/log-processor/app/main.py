@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.monitoring import metrics_response
@@ -126,6 +127,10 @@ async def consume_loop() -> None:
                             partition=tp.partition,
                             offset=message.offset,
                         )
+            if records:
+                # Only now are these records genuinely handled. A crash before
+                # this point replays them rather than skipping them.
+                await commit_safely(consumer, where="log-processor")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -144,12 +149,10 @@ async def startup() -> None:
         retention_days=settings.pipeline.log_retention_days,
     )
 
-    consumer = AIOKafkaConsumer(
+    consumer = build_consumer(
         settings.kafka.topics.logs,
         bootstrap_servers=settings.kafka.bootstrap_servers,
         group_id="airs-log-processor",
-        enable_auto_commit=True,
-        auto_offset_reset="latest",
     )
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka.bootstrap_servers)
 

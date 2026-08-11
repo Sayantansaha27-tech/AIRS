@@ -11,12 +11,14 @@ from typing import Any
 from uuid import uuid4
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import AnomalyEvent, DataSource, Incident, Severity
 from airs_shared.monitoring import metrics_response
 from airs_shared.opensearch import build_client, ensure_index, ensure_retention_policy, upsert_doc
 from airs_shared.settings import get_settings
+from airs_shared.state import StateStore, build_state_store
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Gauge, Histogram
@@ -58,6 +60,7 @@ consumer: AIOKafkaConsumer | None = None
 producer: AIOKafkaProducer | None = None
 worker_task: asyncio.Task[None] | None = None
 clusters: dict[tuple[str, str], IncidentCluster] = {}
+state: StateStore | None = None
 service_config_cache: dict[tuple[str, str], ServiceCorrelationConfig] = {}
 
 os_client = build_client(settings.opensearch.url)
@@ -71,6 +74,11 @@ INCIDENTS_CREATED_TOTAL = Counter(
 INCIDENTS_AMENDED_TOTAL = Counter(
     "airs_incidents_amended_total",
     "Count of amendments applied to already-open incidents",
+    labelnames=("service",),
+)
+ANOMALIES_REPLAYED_TOTAL = Counter(
+    "airs_anomalies_replayed_total",
+    "Anomalies skipped because they had already been correlated",
     labelnames=("service",),
 )
 CORRELATION_PROCESSING_DURATION_SECONDS = Histogram(
@@ -352,7 +360,29 @@ def open_cluster(
     )
 
 
+async def already_processed(anomaly: AnomalyEvent) -> bool:
+    """Whether this exact anomaly has been correlated before.
+
+    Manual offset commits give at-least-once delivery, so a crash between
+    processing and committing replays the batch. Without this, a replay opens a
+    second incident for anomalies already grouped into the first.
+
+    The key is the anomaly id, which is minted once by anomaly-service and
+    travels with the event, so a replayed message carries the same key. Held in
+    the shared state store, which makes it durable across a restart and shared
+    between replicas: the property in-memory deduplication could never have.
+    """
+    if state is None:
+        return False
+    ttl = max(settings.pipeline.correlation_window_minutes * 60 * 4, 3600)
+    return await state.seen_before(f"anomaly-seen:{anomaly.tenant_id}:{anomaly.id}", ttl)
+
+
 async def process_anomaly(anomaly: AnomalyEvent) -> None:
+    if await already_processed(anomaly):
+        ANOMALIES_REPLAYED_TOTAL.labels(service=anomaly.service).inc()
+        return
+
     received_at = datetime.now(UTC)
     config = get_service_config(anomaly.tenant_id, anomaly.service)
     cluster_key = (anomaly.tenant_id, anomaly.service)
@@ -465,6 +495,9 @@ async def consume_loop() -> None:
                             offset=message.offset,
                         )
 
+            if records:
+                await commit_safely(consumer, where="correlation-service")
+
             await flush_stale_clusters()
             ACTIVE_CLUSTERS.set(len(clusters))
         except asyncio.CancelledError:
@@ -476,7 +509,9 @@ async def consume_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global consumer, producer, worker_task
+    global consumer, producer, worker_task, state
+
+    state = await build_state_store(settings.redis.url, namespace="airs-correlation")
 
     ensure_index(os_client, settings.opensearch.incidents_index)
     ensure_index(os_client, TOPOLOGY_INDEX)
@@ -486,12 +521,10 @@ async def startup() -> None:
         retention_days=settings.pipeline.incident_retention_days,
     )
 
-    consumer = AIOKafkaConsumer(
+    consumer = build_consumer(
         settings.kafka.topics.anomalies,
         bootstrap_servers=settings.kafka.bootstrap_servers,
         group_id="airs-correlation-service",
-        enable_auto_commit=True,
-        auto_offset_reset="latest",
     )
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka.bootstrap_servers)
 
@@ -517,6 +550,8 @@ async def shutdown() -> None:
         await consumer.stop()
     if producer is not None:
         await producer.stop()
+    if state is not None:
+        await state.aclose()
 
 
 @app.get("/health")

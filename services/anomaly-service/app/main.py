@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import (
@@ -501,6 +502,8 @@ async def consume_loop() -> None:
                             partition=tp.partition,
                             offset=message.offset,
                         )
+            if records:
+                await commit_safely(consumer, where="anomaly-service")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -516,12 +519,10 @@ async def startup() -> None:
     ensure_index(os_client, SUPPRESSIONS_INDEX)
     await refresh_assets_if_needed(force=True)
 
-    consumer = AIOKafkaConsumer(
+    consumer = build_consumer(
         settings.kafka.topics.processed_logs,
         bootstrap_servers=settings.kafka.bootstrap_servers,
         group_id="airs-anomaly-service",
-        enable_auto_commit=True,
-        auto_offset_reset="latest",
     )
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka.bootstrap_servers)
 

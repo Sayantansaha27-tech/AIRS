@@ -16,6 +16,7 @@ import ai_providers as providers
 import httpx
 from ai_providers import BaseLLMProvider, ProviderConfigError
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import (
@@ -664,6 +665,8 @@ async def consumer_loop() -> None:
                             partition=tp.partition,
                             offset=message.offset,
                         )
+            if records:
+                await commit_safely(consumer, where="ai-service")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -726,12 +729,10 @@ async def startup() -> None:
     ensure_index(os_client, TOPOLOGY_INDEX)
     ensure_index(os_client, SUPPRESSIONS_INDEX)
 
-    consumer = AIOKafkaConsumer(
+    consumer = build_consumer(
         settings.kafka.topics.incidents,
         bootstrap_servers=settings.kafka.bootstrap_servers,
         group_id="airs-ai-service",
-        enable_auto_commit=True,
-        auto_offset_reset="latest",
     )
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka.bootstrap_servers)
     await consumer.start()
