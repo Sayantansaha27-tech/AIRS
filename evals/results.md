@@ -149,13 +149,35 @@ python evals/run_eval.py --llm --model qwen2.5:1.5b-instruct
 python evals/run_eval.py --llm --model qwen2.5:7b-instruct
 ```
 
-An earlier 7B run recorded here was discarded rather than published: the Ollama
-container was stopped part-way through, so four of six fixtures fell through to
-the deterministic path at 0.0 s and the aggregate looked like a reasoning
-failure rather than an infrastructure one. The two fixtures that did complete
-both passed at 100% conclusion recall, including `db-pool-exhaustion` which the
-1.5B model failed, so the tier comparison is genuinely open rather than
-resolved.
+## The 7B tier is not measured
 
-**Six fixtures is far too small a sample to rank two models.** Any tier
-comparison from this harness should be read as a smoke test, not a benchmark.
+`qwen2.5:7b-instruct` is the model the `critical` tier routes to, and it has
+**no results on this page**. Stating why, rather than leaving a gap:
+
+An earlier run was discarded rather than published. The Ollama container was
+stopped part-way through, so four of six fixtures fell through to the
+deterministic path at 0.0 s and the aggregate read as a reasoning failure when
+it was an infrastructure one. Publishing it would have been worse than
+publishing nothing.
+
+The re-run was abandoned for a mundane reason: the 4.7 GB of model weights did
+not fit alongside everything else on the machine doing the measuring. The model
+was removed to reclaim disk.
+
+Two fixtures did complete before the first run was invalidated, and both passed
+at 100% conclusion recall, including `db-pool-exhaustion` which the 1.5B model
+failed on. That is suggestive and it is not evidence. **The tier comparison is
+open.**
+
+To close it:
+
+```bash
+docker exec airs-ollama ollama pull qwen2.5:7b-instruct   # needs ~5 GB free
+python evals/run_eval.py --llm --model qwen2.5:7b-instruct
+```
+
+**Six fixtures is far too small a sample to rank two models anyway.** Even a
+complete run should be read as a smoke test, not a benchmark. The value of this
+harness right now is that it catches a regression in the deterministic path and
+tells you when a prompt change made things worse; it is not yet a measure of
+which model to buy.

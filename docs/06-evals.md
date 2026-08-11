@@ -307,9 +307,13 @@ This list is longer than the measured list. That is the honest state of it.
 - **Whether an RCA is misleading rather than merely wrong.** A confidently
   wrong cause at 2 AM is worse than no answer, and this harness scores both as
   a single FAIL.
-- **Tier comparison.** Six fixtures cannot rank two models. The 7B tier is not
-  reported here because the only completed run was invalidated by the model
-  container being stopped part-way through.
+- **The 7B tier, at all.** `qwen2.5:7b-instruct` is what `critical` incidents
+  route to and it has no results. The only run was invalidated by the model
+  container being stopped part-way through, and the re-run did not fit on the
+  measuring machine's disk. So the tier that matters most is the one with no
+  quality data, and severity routing is currently justified by cost and latency
+  rather than by measured quality. Reproduction steps in
+  [`evals/results.md`](../evals/results.md).
 
 **Detection and correlation**
 
