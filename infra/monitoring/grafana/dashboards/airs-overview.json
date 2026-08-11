@@ -186,9 +186,14 @@
           "expr": "sum(rate(airs_rca_failure_total[5m]))",
           "legendFormat": "rca failures/sec",
           "refId": "B"
+        },
+        {
+          "expr": "sum(rate(airs_rca_success_total{path=\"deterministic\"}[5m]))",
+          "legendFormat": "deterministic fallbacks/sec",
+          "refId": "C"
         }
       ],
-      "title": "Failures",
+      "title": "Failures and degraded-mode RCA",
       "type": "timeseries"
     }
   ],

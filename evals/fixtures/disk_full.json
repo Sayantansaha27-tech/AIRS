@@ -1,0 +1,27 @@
+{
+  "id": "disk-full",
+  "incident_class": "resource_exhaustion",
+  "description": "Disk fills, writes start failing. Distinctive because the errors surface in unrelated subsystems at once.",
+  "incident": {
+    "service": "log-archiver",
+    "severity": "critical",
+    "summary": "log-archiver incident from 5 correlated anomalies (keywords=error)",
+    "timeline": [
+      {"timestamp": "2026-08-10T04:02:11Z", "severity": "warning", "message": "failed to write segment 00041: No space left on device", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T04:02:12Z", "severity": "warning", "message": "disk usage on /var/lib/archiver at 98%", "reasons": ["zscore=4.1"]},
+      {"timestamp": "2026-08-10T04:02:19Z", "severity": "critical", "message": "OSError: [Errno 28] No space left on device", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T04:02:24Z", "severity": "critical", "message": "checkpoint flush aborted, retaining in-memory buffer", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T04:03:02Z", "severity": "critical", "message": "heap usage climbing: 2.1GB of 2.5GB, buffer not draining", "reasons": ["zscore=3.9"]}
+    ],
+    "related_services": []
+  },
+  "ground_truth": {
+    "root_cause": "The volume backing /var/lib/archiver is full at 98%, so every segment write fails with ENOSPC. The rising heap is a consequence: undrained checkpoint buffers are retained in memory because they cannot be flushed to disk.",
+    "primary_service": "log-archiver",
+    "affected_services": ["log-archiver"],
+    "must_mention": ["disk", "space"],
+    "should_mention": ["full", "enospc", "98", "volume", "write"],
+    "must_not_conclude": ["memory leak", "out of memory is the root cause", "garbage collection"],
+    "distractor_note": "A weak RCA reads the climbing heap as a memory leak. The heap is downstream of the disk."
+  }
+}

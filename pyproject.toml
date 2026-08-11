@@ -21,6 +21,9 @@ dependencies = [
 [tool.pytest.ini_options]
 pythonpath = [".", "shared"]
 testpaths = ["tests"]
+markers = [
+  "chaos: runs against a live stack, needs AIRS_CHAOS=1 (see tests/chaos)",
+]
 
 [tool.ruff]
 line-length = 100

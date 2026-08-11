@@ -1,0 +1,26 @@
+{
+  "id": "cert-expiry",
+  "incident_class": "configuration",
+  "description": "A TLS certificate expires. Instantaneous, total, and unrelated to load.",
+  "incident": {
+    "service": "auth-service",
+    "severity": "critical",
+    "summary": "auth-service incident from 4 correlated anomalies (keywords=error)",
+    "timeline": [
+      {"timestamp": "2026-08-10T00:00:04Z", "severity": "critical", "message": "x509: certificate has expired or is not yet valid: current time 2026-08-10T00:00:04Z is after 2026-08-09T23:59:59Z", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T00:00:05Z", "severity": "critical", "message": "TLS handshake failed with token-issuer.internal:443", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T00:00:06Z", "severity": "critical", "message": "unable to verify peer certificate chain", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T00:00:31Z", "severity": "critical", "message": "login failure rate 100%, 412 failures in 30s", "reasons": ["zscore=9.7"]}
+    ],
+    "related_services": ["token-issuer"]
+  },
+  "ground_truth": {
+    "root_cause": "The TLS certificate presented by token-issuer.internal expired at 2026-08-09T23:59:59Z. Every auth-service TLS handshake to it now fails verification, so all logins fail. Onset is exactly at expiry, not correlated with load.",
+    "primary_service": "auth-service",
+    "affected_services": ["auth-service", "token-issuer"],
+    "must_mention": ["certificate", "expir"],
+    "should_mention": ["tls", "x509", "handshake", "renew", "verify"],
+    "must_not_conclude": ["traffic spike", "capacity", "memory", "database"],
+    "distractor_note": "A 100% failure rate with a 9.7 z-score can be misread as a load event."
+  }
+}

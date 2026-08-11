@@ -1,0 +1,27 @@
+{
+  "id": "downstream-5xx",
+  "incident_class": "dependency_failure",
+  "description": "A dependency starts returning 503. The reporting service is healthy and the cause is external to it.",
+  "incident": {
+    "service": "checkout-service",
+    "severity": "critical",
+    "summary": "checkout-service incident from 5 correlated anomalies (keywords=5xx)",
+    "timeline": [
+      {"timestamp": "2026-08-10T09:31:02Z", "severity": "warning", "message": "GET /v2/inventory/reserve returned 503 Service Unavailable", "reasons": ["keywords=5xx"]},
+      {"timestamp": "2026-08-10T09:31:04Z", "severity": "warning", "message": "inventory-service responded 503 (attempt 1 of 3)", "reasons": ["keywords=5xx"]},
+      {"timestamp": "2026-08-10T09:31:09Z", "severity": "warning", "message": "inventory-service responded 503 (attempt 3 of 3), giving up", "reasons": ["keywords=5xx"]},
+      {"timestamp": "2026-08-10T09:31:14Z", "severity": "critical", "message": "checkout aborted: could not reserve inventory", "reasons": ["keywords=error"]},
+      {"timestamp": "2026-08-10T09:32:00Z", "severity": "critical", "message": "circuit breaker open for inventory-service", "reasons": ["keywords=error"]}
+    ],
+    "related_services": ["inventory-service"]
+  },
+  "ground_truth": {
+    "root_cause": "inventory-service is returning 503 to every reservation call. checkout-service is behaving correctly: it retried three times, failed, and opened its circuit breaker. The fault is in inventory-service, not in the service reporting the incident.",
+    "primary_service": "inventory-service",
+    "affected_services": ["checkout-service", "inventory-service"],
+    "must_mention": ["inventory", "503"],
+    "should_mention": ["downstream", "dependen", "circuit", "retr", "unavailable"],
+    "must_not_conclude": ["checkout-service is the root cause", "database", "memory"],
+    "distractor_note": "Tests whether the RCA can name a cause outside the service the incident is filed against."
+  }
+}

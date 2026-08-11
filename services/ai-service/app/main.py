@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import logging
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from redis import asyncio as redis_async
 
 settings = get_settings()
 app = FastAPI(title="AIRS AI Service")
+logger = logging.getLogger("ai-service")
 
 
 @dataclass
@@ -58,8 +60,8 @@ SUPPRESSIONS_INDEX = "airs-suppressions"
 
 RCA_SUCCESS_TOTAL = Counter(
     "airs_rca_success_total",
-    "Count of successful RCA generations",
-    labelnames=("service", "severity"),
+    "Count of RCA generations that produced a result, by path (llm or deterministic)",
+    labelnames=("service", "severity", "path"),
 )
 RCA_FAILURE_TOTAL = Counter(
     "airs_rca_failure_total",
@@ -145,6 +147,20 @@ def tenant_scope_filter(tenant_id: str) -> dict[str, Any]:
     return {"term": {"tenant_id": tenant_id}}
 
 
+def cheaper_model_for(active: RuntimeLLMConfig) -> str:
+    """The lower-cost tier for the provider that is currently active.
+
+    settings.llm.fallback_model names an Ollama model. Using it verbatim after a
+    runtime switch to OpenAI would send an Ollama model name to the OpenAI API,
+    so it only applies while the active provider is the one it was configured
+    for. For any other provider, staying on the active model is correct: the
+    routing decision that still holds is the deterministic tier below.
+    """
+    if active.provider == settings.llm.provider:
+        return settings.llm.fallback_model
+    return active.model
+
+
 def select_model_for_context(context: dict[str, Any], active: RuntimeLLMConfig) -> tuple[str, bool]:
     force_model = context.get("force_model")
     if isinstance(force_model, str) and force_model.strip():
@@ -154,7 +170,7 @@ def select_model_for_context(context: dict[str, Any], active: RuntimeLLMConfig) 
     if severity == "critical":
         return active.model, True
     if severity == "warning":
-        return settings.llm.fallback_model, True
+        return cheaper_model_for(active), True
 
     # Low-severity contexts default to deterministic fallback for latency/cost control.
     return "deterministic", False
@@ -510,7 +526,14 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
     if not use_llm:
         return deterministic_fallback(context), "deterministic"
 
-    provider = build_provider(active, settings)
+    # Provider construction can fail on misconfiguration (for example, provider
+    # set to openai with no API key present). That is a model-availability
+    # problem like any other and must not deny the incident an RCA.
+    try:
+        provider = build_provider(active, settings)
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM provider unavailable, using deterministic RCA")
+        return deterministic_fallback(context), "deterministic"
 
     try:
         llm_payload = await generate_with_retries(provider, prompt, context, model_name)
@@ -564,7 +587,11 @@ async def process_incident(incident_payload: dict[str, Any]) -> None:
         incident.id,
         incident.model_dump(mode="json"),
     )
-    RCA_SUCCESS_TOTAL.labels(service=incident.service, severity=incident.severity.value).inc()
+    RCA_SUCCESS_TOTAL.labels(
+        service=incident.service,
+        severity=incident.severity.value,
+        path="deterministic" if model_used == "deterministic" else "llm",
+    ).inc()
 
 
 async def publish_to_dlq(
@@ -613,7 +640,8 @@ async def consumer_loop() -> None:
                         )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("RCA consumer loop error: %s", exc)
             await asyncio.sleep(1)
 
 

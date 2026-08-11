@@ -1,0 +1,28 @@
+{
+  "id": "memory-leak",
+  "incident_class": "resource_exhaustion",
+  "description": "Genuine slow memory growth ending in an OOM kill. The mirror image of disk_full: here the memory really is the cause.",
+  "incident": {
+    "service": "recommendation-service",
+    "severity": "critical",
+    "summary": "recommendation-service incident from 6 correlated anomalies (keywords=oom)",
+    "timeline": [
+      {"timestamp": "2026-08-10T01:10:00Z", "severity": "warning", "message": "heap usage 1.6GB of 2.0GB after full GC, up from 900MB at 21:00", "reasons": ["zscore=3.2"]},
+      {"timestamp": "2026-08-10T01:40:00Z", "severity": "warning", "message": "GC pause 1400ms, old gen not reclaiming", "reasons": ["zscore=3.8"]},
+      {"timestamp": "2026-08-10T02:05:00Z", "severity": "warning", "message": "heap usage 1.9GB of 2.0GB after full GC", "reasons": ["zscore=4.2"]},
+      {"timestamp": "2026-08-10T02:11:00Z", "severity": "warning", "message": "embedding cache entries: 4,812,004 (no eviction configured)", "reasons": ["zscore=4.6"]},
+      {"timestamp": "2026-08-10T02:12:44Z", "severity": "critical", "message": "java.lang.OutOfMemoryError: Java heap space", "reasons": ["keywords=oom"]},
+      {"timestamp": "2026-08-10T02:12:51Z", "severity": "critical", "message": "Container recommendation-service killed, reason: OOMKilled", "reasons": ["keywords=oom"]}
+    ],
+    "related_services": []
+  },
+  "ground_truth": {
+    "root_cause": "An unbounded embedding cache in recommendation-service grows without eviction, reaching 4.8 million entries. Old-generation heap is not reclaimed across full GCs, so the process exhausts its 2GB heap and is OOM killed.",
+    "primary_service": "recommendation-service",
+    "affected_services": ["recommendation-service"],
+    "must_mention": ["memory", "heap"],
+    "should_mention": ["leak", "cache", "eviction", "oom", "unbounded", "grow"],
+    "must_not_conclude": ["disk full", "traffic spike is the root cause", "network"],
+    "distractor_note": "Requires distinguishing a real leak from the disk_full case, where memory growth was a symptom."
+  }
+}

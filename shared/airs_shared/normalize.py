@@ -23,11 +23,24 @@ def normalize_log(raw: dict[str, Any] | str) -> NormalizedLogEvent:
     message = str(raw.get("message") or "")
     tenant_id = str(raw.get("tenant_id") or "default")
 
-    metadata = {
-        k: v
-        for k, v in raw.items()
-        if k not in {"timestamp", "service", "level", "message", "tenant_id"}
-    }
+    # Normalization is applied at every hop, so it must be idempotent. An event
+    # that already carries a metadata object gets it merged rather than nested,
+    # otherwise each pass buries the previous one a level deeper.
+    existing = raw.get("metadata")
+    if isinstance(existing, dict):
+        metadata: dict[str, Any] = dict(existing)
+    elif existing is not None:
+        # Not our shape, but dropping a caller's field silently is worse.
+        metadata = {"metadata": existing}
+    else:
+        metadata = {}
+    metadata.update(
+        {
+            k: v
+            for k, v in raw.items()
+            if k not in {"timestamp", "service", "level", "message", "tenant_id", "metadata"}
+        }
+    )
     return NormalizedLogEvent.model_validate(
         {
             "timestamp": timestamp,
