@@ -76,7 +76,10 @@ def load_service(name: str):
     # ai-service imports sibling modules (rca, ai_providers) by bare name.
     sys.path.insert(0, str(app_dir))
     try:
-        with patch("opensearchpy.OpenSearch", MagicMock()):
+        with (
+            patch("opensearchpy.OpenSearch", MagicMock()),
+            patch("opensearchpy.AsyncOpenSearch", MagicMock()),
+        ):
             spec = importlib.util.spec_from_file_location(module_name, app_dir / "main.py")
             assert spec is not None and spec.loader is not None
             module = importlib.util.module_from_spec(spec)
@@ -104,7 +107,11 @@ def ingestion(producer: ProducerSpy):
 def log_processor(producer: ProducerSpy, monkeypatch: pytest.MonkeyPatch):
     module = load_service("log_processor")
     module.producer = producer
-    monkeypatch.setattr(module, "upsert_doc", lambda *a, **k: None)
+
+    async def _noop_bulk(client, index, documents, *, refresh=False):
+        return len(documents)
+
+    monkeypatch.setattr(module, "bulk_index", _noop_bulk)
     yield module
     module.producer = None
 

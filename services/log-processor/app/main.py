@@ -11,13 +11,15 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.models import NormalizedLogEvent
 from airs_shared.monitoring import metrics_response
 from airs_shared.normalize import normalize_log
 from airs_shared.opensearch import (
+    async_ensure_index,
+    build_async_client,
     build_client,
-    ensure_index,
+    bulk_index,
     ensure_retention_policy,
-    upsert_doc,
 )
 from airs_shared.settings import get_settings
 from fastapi import FastAPI
@@ -33,6 +35,7 @@ producer: AIOKafkaProducer | None = None
 worker_task: asyncio.Task[None] | None = None
 
 os_client = build_client(settings.opensearch.url)
+os_async = build_async_client(settings.opensearch.url)
 LOGS_PROCESSED_TOTAL = Counter(
     "airs_logs_processed_total",
     "Count of processed log events",
@@ -54,35 +57,69 @@ CONSUMER_BATCH_SIZE = Gauge(
 )
 
 
-async def handle_message(raw_payload: dict) -> None:
-    normalized = normalize_log(raw_payload)
-    started_at = perf_counter()
+def document_id(normalized: NormalizedLogEvent) -> str:
+    """Stable per event, so re-ingesting the same log overwrites rather than
+    duplicating. That idempotence is what makes at-least-once safe here."""
+    return (
+        f"{normalized.tenant_id}-{normalized.service}-"
+        f"{normalized.timestamp.timestamp()}-{abs(hash(normalized.message))}"
+    )
 
-    upsert_doc(
-        os_client,
+
+async def handle_batch(payloads: list[dict]) -> list[tuple[dict, Exception]]:
+    """Normalize, index in one bulk request, then forward.
+
+    Previously each event was indexed individually with refresh=True through
+    the synchronous client, from inside this async loop. That paid a segment
+    flush per document and blocked the event loop for the duration of every
+    call, and it was the measured ceiling on the ingest path.
+
+    Returns the events that could not be normalized, for dead-lettering. An
+    indexing failure raises, because that is a dependency problem affecting the
+    whole batch rather than a property of one event.
+    """
+    started_at = perf_counter()
+    rejected: list[tuple[dict, Exception]] = []
+    normalized_events: list[NormalizedLogEvent] = []
+
+    for payload in payloads:
+        try:
+            normalized_events.append(normalize_log(payload))
+        except Exception as exc:  # noqa: BLE001
+            rejected.append((payload, exc))
+
+    if not normalized_events:
+        return rejected
+
+    ingested_at = datetime.now(UTC).isoformat()
+    await bulk_index(
+        os_async,
         settings.opensearch.logs_index,
-        (
-            f"{normalized.tenant_id}-{normalized.service}-"
-            f"{normalized.timestamp.timestamp()}-{abs(hash(normalized.message))}"
-        ),
-        {
-            **normalized.model_dump(mode="json"),
-            "ingested_at": datetime.now(UTC).isoformat(),
-        },
+        [
+            (
+                document_id(event),
+                {**event.model_dump(mode="json"), "ingested_at": ingested_at},
+            )
+            for event in normalized_events
+        ],
     )
 
     if producer is None:
-        return
+        return rejected
 
-    await produce_json(
-        producer,
-        settings.kafka.topics.processed_logs,
-        normalized.model_dump(mode="json"),
-    )
-    LOGS_PROCESSED_TOTAL.labels(service=normalized.service).inc()
-    LOGS_PROCESSING_DURATION_SECONDS.labels(service=normalized.service).observe(
-        perf_counter() - started_at
-    )
+    for event in normalized_events:
+        await produce_json(
+            producer,
+            settings.kafka.topics.processed_logs,
+            event.model_dump(mode="json"),
+        )
+        LOGS_PROCESSED_TOTAL.labels(service=event.service).inc()
+
+    elapsed = (perf_counter() - started_at) / len(normalized_events)
+    for event in normalized_events:
+        LOGS_PROCESSING_DURATION_SECONDS.labels(service=event.service).observe(elapsed)
+
+    return rejected
 
 
 async def publish_to_dlq(
@@ -115,18 +152,35 @@ async def consume_loop() -> None:
             records = await consumer.getmany(timeout_ms=1000, max_records=200)
             CONSUMER_BATCH_SIZE.set(sum(len(tp_records) for tp_records in records.values()))
             for tp, tp_records in records.items():
+                payloads: list[dict] = []
+                offsets: list[int] = []
                 for message in tp_records:
-                    payload = json.loads(message.value.decode("utf-8"))
-                    try:
-                        await handle_message(payload)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("Failed to process log event: %s", exc)
+                    payloads.append(json.loads(message.value.decode("utf-8")))
+                    offsets.append(message.offset)
+
+                try:
+                    rejected = await handle_batch(payloads)
+                except Exception as exc:  # noqa: BLE001
+                    # A dependency failed for the whole batch, so every event in
+                    # it is dead-lettered rather than silently lost.
+                    logger.exception("Batch indexing failed: %s", exc)
+                    for payload, offset in zip(payloads, offsets, strict=True):
                         await publish_to_dlq(
                             payload=payload,
                             error=exc,
                             partition=tp.partition,
-                            offset=message.offset,
+                            offset=offset,
                         )
+                    continue
+
+                for payload, exc in rejected:
+                    logger.warning("Rejecting unprocessable log event: %s", exc)
+                    await publish_to_dlq(
+                        payload=payload,
+                        error=exc,
+                        partition=tp.partition,
+                        offset=None,
+                    )
             if records:
                 # Only now are these records genuinely handled. A crash before
                 # this point replays them rather than skipping them.
@@ -142,7 +196,7 @@ async def consume_loop() -> None:
 async def startup() -> None:
     global consumer, producer, worker_task
 
-    ensure_index(os_client, settings.opensearch.logs_index)
+    await async_ensure_index(os_async, settings.opensearch.logs_index)
     ensure_retention_policy(
         os_client,
         index_name=settings.opensearch.logs_index,
@@ -175,6 +229,7 @@ async def shutdown() -> None:
         await consumer.stop()
     if producer is not None:
         await producer.stop()
+    await os_async.close()
 
 
 @app.get("/health")
