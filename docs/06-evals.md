@@ -178,6 +178,40 @@ hardware, and it is why `info` severity never calls a model at all.
 
 ---
 
+## Chaos verification
+
+The claim the whole design rests on is that the pipeline does not depend on
+model availability. Run against the live stack:
+
+```
+AIRS_CHAOS=1 pytest tests/chaos -v
+
+test_incident_still_gets_rca_with_ai_service_down       PASSED
+test_no_duplicate_incident_after_recovery               PASSED
+test_deterministic_rca_when_the_model_is_unreachable    PASSED
+test_ingestion_stays_available_throughout               PASSED
+
+4 passed in 42.76s
+```
+
+What that run actually established, with ai-service stopped mid-flight:
+
+| Assertion | Result |
+| --- | --- |
+| Ingestion keeps accepting batches | 5 batches, 25 events, all accepted |
+| Incidents are still created | yes, written by correlation before RCA exists |
+| DLQ does not grow | unchanged |
+| Recovery enriches the queued incident | yes |
+| Recovery does not duplicate incidents | same ids before and after |
+| Unreachable model still yields an RCA | deterministic, and it says so |
+
+This is the difference between an architecture diagram and a property. It is
+documented as a release gate in [07-runbook.md](07-runbook.md) rather than wired
+into CI, because it needs the full stack and stops containers as part of the
+test.
+
+---
+
 ## Per-stage CPU cost
 
 Benchmarked with Kafka and OpenSearch stubbed out, 50,000 synthetic events.
