@@ -60,8 +60,8 @@ SUPPRESSIONS_INDEX = "airs-suppressions"
 
 RCA_SUCCESS_TOTAL = Counter(
     "airs_rca_success_total",
-    "Count of successful RCA generations",
-    labelnames=("service", "severity"),
+    "Count of RCA generations that produced a result, by path (llm or deterministic)",
+    labelnames=("service", "severity", "path"),
 )
 RCA_FAILURE_TOTAL = Counter(
     "airs_rca_failure_total",
@@ -587,7 +587,11 @@ async def process_incident(incident_payload: dict[str, Any]) -> None:
         incident.id,
         incident.model_dump(mode="json"),
     )
-    RCA_SUCCESS_TOTAL.labels(service=incident.service, severity=incident.severity.value).inc()
+    RCA_SUCCESS_TOTAL.labels(
+        service=incident.service,
+        severity=incident.severity.value,
+        path="deterministic" if model_used == "deterministic" else "llm",
+    ).inc()
 
 
 async def publish_to_dlq(
