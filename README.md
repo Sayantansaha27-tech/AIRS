@@ -1,6 +1,6 @@
 # AIRS — AI Incident Response System
 
-> **An event-driven, Kafka-native incident intelligence platform that ingests raw logs, detects anomalies, correlates them into incidents, and generates AI-powered Root Cause Analysis — all in real time, all locally runnable.**
+> **An event-driven, Kafka-native incident intelligence platform that ingests raw logs, detects anomalies, correlates them into incidents, and generates AI-powered Root Cause Analysis. Streaming end to end, and fully runnable on one machine.**
 
 [![CI](https://github.com/Sayantansaha27-tech/AIRS/actions/workflows/ci.yml/badge.svg)](https://github.com/Sayantansaha27-tech/AIRS/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
@@ -59,7 +59,7 @@ OpenSearch: airs-incidents
 
 This means:
 
-- **Every stage is independently scalable.** The anomaly detector can lag without blocking ingestion. The AI service can be slow without stalling correlation.
+- **Every stage fails and lags independently.** The anomaly detector can lag without blocking ingestion. The AI service can be slow without stalling correlation. Each stage is its own consumer group, so backpressure at one does not propagate upstream. Note this is isolation, not horizontal scale: anomaly-service and correlation-service both hold per-service state in memory, so running two replicas of either splits that state rather than sharing it. Scaling those two needs the state moved out first.
 - **The AI is opt-out, not opt-in.** Incidents always exist. RCA is async enrichment on top of them. A model timeout never breaks your incident pipeline.
 - **You own the data.** Default setup is fully local: Kafka, OpenSearch, and Ollama running in Docker. No data leaves your machine unless you choose OpenAI mode.
 - **The provider is a runtime detail.** Swap Ollama for OpenAI — or back — with a single API call. No restarts required.
@@ -283,6 +283,30 @@ so `incidents-topic` lag grows for as long as the outage lasts. The pipeline
 degrades rather than stalling, and `airs_rca_success_total{path="deterministic"}`
 is how you see it happening.
 
+### End-to-end latency
+
+"Real time" is worth being concrete about, because the honest answer is
+"depends entirely on severity".
+
+| Segment | Cost |
+| --- | --- |
+| Each of the four consumer hops | up to ~1s, `getmany(timeout_ms=1000)` |
+| Correlation, critical anomaly | emits on arrival |
+| Correlation, first two distinct warning signals | emits on the second |
+| Correlation, a single isolated warning | waits for the window to close, **default 10 minutes** |
+| RCA, model reachable | one inference, 8s timeout |
+| RCA, model unreachable | ~54s, then the deterministic fallback |
+| UI | 5s poll. The dashboard polls REST and does not consume the SSE endpoint |
+| `GET /v1/stream` | 2s poll against OpenSearch, pushed over SSE |
+
+So a critical incident goes from log line to RCA in seconds. A lone warning
+that never gets a second distinct signal is not an incident at all until its
+correlation window expires. Both behaviours are deliberate, and neither is
+what "real time" implies on its own.
+
+Measured throughput and per-stage percentiles, with the hardware and method
+stated, are in [`docs/06-evals.md`](docs/06-evals.md).
+
 ---
 
 ## Features
@@ -294,7 +318,7 @@ is how you see it happening.
 | **Detection** | per-service seasonal (hour-of-day) EWMA baselines, z-score scoring, keyword scan, configurable detection rules per service |
 | **Correlation** | Time-window grouping per service, fingerprint deduplication, parent/child linking across a configured service graph |
 | **AI / RCA** | Severity-based model routing, hybrid confidence scoring, deterministic fallback, RCA feedback capture |
-| **API** | REST CRUD, cursor pagination, SSE stream, schema registry, audit log |
+| **API** | REST CRUD, cursor pagination, SSE stream (2s poll), schema registry, audit log |
 | **Ops** | Prometheus metrics on all services, Grafana dashboards, log/incident retention policies |
 | **Multi-tenancy** | `tenant_id` on all pipeline entities, `x-tenant-id` header scoping |
 | **ChatOps** | Slack webhook integration, slash command handler |
