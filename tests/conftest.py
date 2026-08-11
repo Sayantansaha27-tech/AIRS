@@ -137,6 +137,15 @@ def correlation(producer: ProducerSpy, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
+def gateway(producer: ProducerSpy):
+    """api-gateway is a producer only. It has no Kafka consumer and no DLQ."""
+    module = load_service("gateway")
+    module.producer = producer
+    yield module
+    module.producer = None
+
+
+@pytest.fixture
 def ai(producer: ProducerSpy, monkeypatch: pytest.MonkeyPatch):
     module = load_service("ai")
     module.producer = producer

@@ -27,7 +27,7 @@ from the map:
 ```python
 if anomaly.severity == Severity.critical:
     await emit_incident(cluster)
-    clusters.pop(cluster_key, None)     # fingerprints die here
+    clusters.pop(cluster_key, None)  # fingerprints die here
 ```
 
 The fingerprint set died with the cluster. The next anomaly for that service
