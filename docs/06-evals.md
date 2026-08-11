@@ -51,15 +51,22 @@ python evals/run_eval.py --llm --model qwen2.5:1.5b-instruct
 Measured, 25 to 30 second runs at each rate, 10% error ratio across 8 synthetic
 services.
 
-| Target rate | Achieved | Rejected | Batch p50 | Batch p99 | Logs processed | Verdict |
-| --- | --- | --- | --- | --- | --- | --- |
-| 200/s | **198.1/s** | 0 | 8.5 ms | 21.2 ms | 100% | healthy |
-| 400/s | 392.8/s | 0 | 10.0 ms | 26.9 ms | 88% | degrading |
-| 700/s | 679.1/s | 0 | 8.3 ms | 15.9 ms | 61% | degraded |
-| 1000/s | 979.7/s | 0 | 12.2 ms | 41.6 ms | 40% | broken |
+Measured twice: before the async and bulk-indexing work, and after.
 
-**Sustained rate before lag grows: roughly 200 events/sec.** That is the honest
-headline number and it is not a large one.
+| Target rate | Logs processed (before) | Logs processed (after) | correlation-service | DLQ |
+| --- | --- | --- | --- | --- |
+| 200/s | 100% | 100% | reachable | 0 |
+| 400/s | 88% | **100%** | blocked -> **reachable** | 0 |
+| 700/s | 61% | **100%** | blocked -> **reachable** | 0 |
+| 1000/s | 40% | **100%** | blocked -> **reachable** | 0 |
+| 2667/s | not reached | **100%** | reachable | 0 |
+
+After, at 1000/s: 978.6 achieved, 0 rejected, batch p99 39.6 ms.
+At 2667/s: 0 rejected, batch p99 71.8 ms, tail latency degraded (see below).
+
+**Sustained rate before lag grows: roughly 1,000 events/sec**, up from roughly
+200. It still processes every event at 2,667/sec, with a degraded tail rather
+than a failure.
 
 Two things to read carefully here.
 
@@ -69,22 +76,22 @@ below is a consumer failing to keep up, which is exactly the shape the
 architecture predicts: backpressure does not propagate upstream, so the front
 door stays open while the pipeline falls behind it.
 
-**log-processor saturates at about 350 to 400 events/sec.** Its throughput
-plateaus at roughly 10,000 events per 25 seconds regardless of how much more
-arrives. It indexes every event into OpenSearch with `refresh=True`, forcing a
-refresh per document, through the **synchronous** client called from inside an
-async loop. This is the predicted bottleneck from
-[05-failure-modes.md](05-failure-modes.md), and it is now measured rather than
-suspected.
+**log-processor was the first bottleneck, and no longer is.** It used to
+plateau near 10,000 events per 25 seconds regardless of load, because it
+indexed every event with `refresh=True` through the synchronous client from
+inside an async loop. It now normalizes a whole Kafka batch, indexes it in one
+bulk request with `refresh=False`, and keeps up at every rate tested.
 
-### What breaks first: correlation-service stops answering
+### What used to break first: correlation-service stopped answering
 
-The most useful finding of the load test, and it is not a throughput number.
+The most useful finding of the first load test, and it was not a throughput
+number. It is recorded here because the diagnosis is the interesting part, and
+because the fix followed directly from it.
 
-At **400 events/sec and above, correlation-service stops responding entirely**.
-Not slow: unresponsive. `/health/live` times out after 5 seconds and `/metrics`
-returns nothing, while the process is running and has not been OOM killed or
-restarted.
+At **400 events/sec and above, correlation-service stopped responding
+entirely**. Not slow: unresponsive. `/health/live` timed out after 5 seconds
+and `/metrics` returned nothing, while the process was running and had not been
+OOM killed or restarted.
 
 Its logs during the run:
 
@@ -108,14 +115,19 @@ That is a single causal chain, and it connects three failure modes that
 3. Eviction forces a rebalance, and the auto-commit offset write fails against
    a group the consumer is no longer a member of.
 
-Step 3 is the silent-data-loss path, observed happening under ordinary load
-rather than only during a deploy. The blocking-I/O defect is not a throughput
-inconvenience; it is what triggers the durability defect.
+Step 3 was the silent-data-loss path, observed happening under ordinary load
+rather than only during a deploy. The blocking-I/O defect was not a throughput
+inconvenience; it was what triggered the durability defect.
 
-**This is the first thing to fix.** It also explains why "1000 events/sec"
-reported negative counter deltas in an early run: a service that stops serving
-`/metrics` is not a service doing zero work, and the load test now says so
-explicitly rather than subtracting.
+**Both ends are now fixed.** correlation-service uses the async OpenSearch
+client, so its event loop stays free and heartbeats keep flowing; and
+consumers commit manually with a durable idempotency key, so a rebalance
+replays rather than loses. At 1000 events/sec correlation-service now stays
+reachable throughout.
+
+This also explains why an early run reported negative counter deltas: a
+service that stops serving `/metrics` is not a service doing zero work, and
+the load test now says so explicitly rather than subtracting.
 
 ### DLQ rate
 
@@ -143,14 +155,18 @@ therefore excludes the correlation window.
 | Load | p50 | p95 | Samples |
 | --- | --- | --- | --- |
 | Idle | **0.28 s** | 0.30 s | 5 |
-| 700/s | 0.27 s | **45.42 s** | 3 |
-| 1000/s | no incident within 120 s | | 3 |
+| 1000/s, before | no incident within 120 s | | 3 |
+| 1000/s, after | **0.27 s** | 0.27 s | 3 |
+| 2667/s, after | 0.28 s | **16.64 s** | 3 |
 
-Under 300 ms idle, through four Kafka hops and two OpenSearch writes, is a good
-number and the one the architecture was aimed at. The p95 at 700/sec shows what
-saturation does to the tail: the median is unchanged while the tail degrades by
-two orders of magnitude, which is the classic signature of a queue rather than
-a slowdown.
+Under 300 ms idle, through four Kafka hops and two OpenSearch writes, is the
+number the architecture was aimed at. What changed is that it now holds *under
+load*: at 1000 events/sec the p50 and p95 are both 0.27 s, where previously no
+incident appeared at all within a two-minute timeout.
+
+The p95 at 2667/sec shows saturation arriving: the median is unchanged while
+the tail degrades by two orders of magnitude, which is the signature of a queue
+rather than a slowdown.
 
 **A non-critical incident is bounded by correlation, not transport.** An
 isolated warning waits for `window_duration_minutes` (default 10 minutes)
@@ -226,11 +242,13 @@ end-to-end numbers above are the ones to quote.
 | correlation | 131,614 | 1.25 µs | **170.79 µs** |
 | deterministic RCA | 134,771 | 7.33 µs | 8.79 µs |
 
-The conclusion is stark: the pure computation runs at roughly **500,000
-events/sec**, and the deployed pipeline manages **200**. AIRS is I/O bound by a
-factor of about 2,500. Nothing in the detection or correlation logic needs
-optimising; the synchronous OpenSearch client and per-document `refresh=True`
-account for essentially the entire gap.
+The conclusion when this was first measured was stark: the pure computation
+ran at roughly **500,000 events/sec** while the deployed pipeline managed
+**200**, so nothing in the detection or correlation logic needed optimising and
+the entire gap was I/O. Acting on that closed most of it: the deployed pipeline
+now sustains **1,000** and processes cleanly at **2,667**. It remains I/O bound,
+which is the expected state for a system whose job is to move events between a
+log, a search index and a model.
 
 Correlation's p99 is 137x its p50 because the emit path (building the timeline,
 validating the model, resolving the parent) is far more expensive than the

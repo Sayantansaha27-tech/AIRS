@@ -128,12 +128,20 @@ ingestion-service, log-processor, anomaly-service, correlation-service and
 ai-service. api-gateway has no DLQ path by design, because it is a synchronous
 REST surface that returns errors to its caller rather than parking them.
 
-**The DLQ is currently write-only.** Events land there with their source topic,
-partition, offset and failure reason, and `airs_dlq_published_total` makes the
-rate visible, but nothing consumes the topic and there is no drain or
-replay-from-DLQ tooling. `POST /v1/admin/replay` replays a topic and offset
-range, which is not the same thing. Draining is a manual operation today; see
-[`docs/07-runbook.md`](docs/07-runbook.md).
+Events land there with their source topic, partition, offset and failure
+reason, and `airs_dlq_published_total` makes the rate visible. Inspect and
+drain it with `tools/dlq.py`:
+
+```bash
+docker compose exec ai-service python /app/tools/dlq.py peek
+docker compose exec ai-service python /app/tools/dlq.py drain --dry-run
+```
+
+Peeking joins no consumer group and commits no offset, so it is repeatable.
+Draining republishes each payload to the topic it failed on, which only
+succeeds if the cause was fixed first. Nothing consumes the DLQ
+automatically, and that is deliberate: an automatic retry of an event that
+failed for a permanent reason is an infinite loop.
 
 ### Service dependency graph
 
@@ -311,7 +319,7 @@ inference:
 
 | | |
 | --- | --- |
-| Sustained ingestion before lag grows | **~200 events/sec** |
+| Sustained ingestion before lag grows | **~1,000 events/sec** |
 | Log to queryable incident, idle | **280 ms** p50 |
 | Log to queryable incident, at 700/sec | 270 ms p50, **45 s** p95 |
 | RCA, deterministic fallback | **< 1 ms** |
@@ -319,16 +327,16 @@ inference:
 | DLQ rate, healthy and degraded | **0** |
 | What breaks first | **correlation-service**, at ~400 events/sec |
 
-200 events/sec is not a large number, and the reason is worth stating: the
-pipeline's own computation benchmarks at roughly 500,000 events/sec, so AIRS is
-I/O bound by about 2,500x. Synchronous OpenSearch calls from inside async loops
-and per-document `refresh=True` account for essentially the whole gap.
+That is a 5x improvement on a first measurement of ~200 events/sec, and the
+gap was entirely I/O rather than computation. The pipeline's own logic
+benchmarks near 500,000 events/sec; the deployed system was losing the
+difference to synchronous OpenSearch calls made from inside async loops and to
+`refresh=True` on every single document.
 
-Above ~400 events/sec correlation-service stops answering its own health
-endpoint entirely: its event loop is blocked, so Kafka heartbeats stop, the
-broker evicts the consumer, and the auto-commit offset write then fails. Method,
-full numbers, RCA quality scoring and an explicit list of what is **not**
-measured are in [`docs/06-evals.md`](docs/06-evals.md).
+At 2,667 events/sec it still processes every event with zero dead-lettered,
+though the tail latency degrades. Method, full before-and-after numbers, RCA
+quality scoring and an explicit list of what is **not** measured are in
+[`docs/06-evals.md`](docs/06-evals.md).
 
 ---
 

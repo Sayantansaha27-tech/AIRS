@@ -53,19 +53,17 @@ Three further gaps, so this is not read as a single missing feature:
 - **No tenant lifecycle.** There is no create, suspend or delete for a tenant,
   and no way to purge one tenant's data without a hand-written query.
 
-### The DLQ is write-only
+### The DLQ is not drained automatically
 
 Every pipeline stage parks unprocessable events on `airs-dlq-topic` with the
-source topic, partition, offset and failure reason. Nothing consumes that
-topic. There is no drain tool, no replay-from-DLQ path, and no alert on depth
-beyond the raw counter.
+source topic, partition, offset and failure reason. `tools/dlq.py` inspects and
+replays it.
 
-`POST /v1/admin/replay` replays a topic and offset range. That is a different
-operation and it is not a substitute.
-
-So the DLQ prevents silent data loss and gives you a place to look. It does
-not give you recovery. Draining is a manual operation, documented in
-[07-runbook.md](07-runbook.md).
+What does not exist is *automatic* recovery, and that is deliberate rather
+than missing: an event that failed for a permanent reason will fail again, so
+an automatic retry loop is an infinite one. Draining is an operator decision
+made after fixing the cause. There is also no alert on DLQ depth beyond the
+raw counter, which is a genuine gap.
 
 ### RCA quality is not guaranteed, and cannot be
 
@@ -132,19 +130,22 @@ want and it is not implemented.
 
 **5. AIRS does not fine-tune or train anything.** It uses off-the-shelf
 instruction models through a provider interface. RCA feedback is captured and
-stored; nothing consumes it. Calling that a feedback loop would be a lie, so
-the README calls it feedback capture.
+stored and fed back into the RCA context for later incidents on the same
+service, with the prompt instructing the model to weight an operator's
+correction above its own prior. What is *not* there is any training or tuning:
+nothing learns, it is retrieval.
 
-**6. AIRS does not guarantee exactly-once processing.** Consumers use Kafka
-auto-commit, so a crash mid-batch can lose in-flight events. See
-[05-failure-modes.md](05-failure-modes.md) for the blast radius. Moving to
-manual commits is understood and deliberately deferred.
+**6. AIRS does not guarantee exactly-once processing.** It guarantees
+at-least-once. Consumers commit only after a batch is handled, so a crash
+replays rather than skips, and correlation deduplicates replayed anomalies
+against a durable key. Exactly-once would need transactional produce-and-commit
+across Kafka and OpenSearch, which is not built.
 
-**7. AIRS is not horizontally scalable today.** Stages fail and lag
-independently, which is the property that matters most, but anomaly-service
-and correlation-service both hold per-service state in process memory. Two
-replicas of either split that state rather than sharing it. Scaling them means
-externalising state first.
+**7. Horizontal scale is partly unlocked.** Correlation's deduplication keys
+now live in Redis, so replayed and concurrent anomalies deduplicate across
+replicas. Open correlation clusters and anomaly baselines are still in process
+memory, so running two replicas of either still splits that state. Finishing
+this means moving those two structures as well.
 
 **8. AIRS does not do alert routing or on-call scheduling.** It notifies a
 webhook or a Slack channel. It is not PagerDuty and should not grow into it.

@@ -41,6 +41,37 @@ order.
 
 ---
 
+## What has since been fixed
+
+Everything in this section was written as a standing criticism. Four of the
+five have since been acted on, and the sequence turned out to matter more than
+any individual fix.
+
+Auto-commit could not be fixed on its own. At-least-once delivery needs
+idempotent handlers, incident creation was not idempotent, and making it
+idempotent needed a durable key, which needed state out of process. Four items
+that read as a list were actually one change with a forced order:
+
+1. shared state store (Redis, with an in-memory fallback)
+2. durable idempotency key for anomalies
+3. manual offset commits
+4. async OpenSearch and bulk indexing
+
+The measured result is in [06-evals.md](06-evals.md): sustained throughput went
+from roughly 200 events/sec to roughly 1,000, end-to-end latency at 1000/sec
+went from "no incident within two minutes" to 270 ms, and the rebalance storm
+that produced silent data loss no longer happens because the event loop is no
+longer blocked.
+
+The one I have not fixed is the emission disjunction. It is a product question
+rather than an engineering one, and I still cannot tell you how much the
+seasonal baseline contributes, which remains the answer.
+
+The section below is left as originally written, because the reasoning is worth
+more than the status.
+
+---
+
 ## The design decisions I would revisit
 
 ### 1. Auto-commit was the wrong default, and I would fix it first
