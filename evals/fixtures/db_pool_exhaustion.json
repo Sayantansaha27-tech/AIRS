@@ -1,0 +1,28 @@
+{
+  "id": "db-pool-exhaustion",
+  "incident_class": "resource_exhaustion",
+  "description": "Connection pool saturates, downstream calls queue and time out. The timeouts are the symptom, the pool is the cause.",
+  "incident": {
+    "service": "orders-service",
+    "severity": "critical",
+    "summary": "orders-service incident from 6 correlated anomalies (keywords=timeout)",
+    "timeline": [
+      {"timestamp": "2026-08-10T02:14:03Z", "severity": "warning", "message": "HikariPool-1 - Connection is not available, request timed out after 30000ms", "reasons": ["keywords=timeout"]},
+      {"timestamp": "2026-08-10T02:14:05Z", "severity": "warning", "message": "HikariPool-1 - Pool stats (total=20, active=20, idle=0, waiting=47)", "reasons": ["zscore=3.4"]},
+      {"timestamp": "2026-08-10T02:14:09Z", "severity": "warning", "message": "timeout while creating order", "reasons": ["keywords=timeout"]},
+      {"timestamp": "2026-08-10T02:14:12Z", "severity": "warning", "message": "upstream payment-gateway call exceeded 5000ms budget", "reasons": ["keywords=timeout"]},
+      {"timestamp": "2026-08-10T02:14:20Z", "severity": "critical", "message": "HikariPool-1 - Connection is not available, request timed out after 30000ms", "reasons": ["keywords=timeout"]},
+      {"timestamp": "2026-08-10T02:14:31Z", "severity": "critical", "message": "order submission failed: could not obtain connection", "reasons": ["keywords=connection refused"]}
+    ],
+    "related_services": ["postgres-primary", "payment-gateway"]
+  },
+  "ground_truth": {
+    "root_cause": "The orders-service database connection pool is exhausted. All 20 connections are checked out with 47 requests queued, so callers block until their 30 second acquisition timeout expires. The payment-gateway slowness is a downstream symptom of requests holding connections while waiting, not an independent fault.",
+    "primary_service": "orders-service",
+    "affected_services": ["orders-service", "postgres-primary", "payment-gateway"],
+    "must_mention": ["pool", "connection"],
+    "should_mention": ["exhaust", "saturat", "timeout", "waiting", "queue"],
+    "must_not_conclude": ["payment-gateway is the root cause", "network partition", "out of memory"],
+    "distractor_note": "A weak RCA blames payment-gateway because its name appears in the loudest log line."
+  }
+}

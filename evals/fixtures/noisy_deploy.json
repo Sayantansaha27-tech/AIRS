@@ -1,0 +1,26 @@
+{
+  "id": "noisy-deploy",
+  "incident_class": "benign",
+  "description": "A rolling deploy producing expected restart noise. The correct answer is that nothing is broken.",
+  "incident": {
+    "service": "catalog-service",
+    "severity": "warning",
+    "summary": "catalog-service incident from 4 correlated anomalies (zscore=3.1)",
+    "timeline": [
+      {"timestamp": "2026-08-10T11:00:02Z", "severity": "warning", "message": "SIGTERM received, draining connections", "reasons": ["zscore=3.1"]},
+      {"timestamp": "2026-08-10T11:00:04Z", "severity": "warning", "message": "connection refused: catalog-service-7d9f:8080", "reasons": ["keywords=connection refused"]},
+      {"timestamp": "2026-08-10T11:00:21Z", "severity": "warning", "message": "starting catalog-service version 4.12.0 (was 4.11.3)", "reasons": ["zscore=3.4"]},
+      {"timestamp": "2026-08-10T11:00:29Z", "severity": "warning", "message": "readiness probe passed, serving traffic", "reasons": ["zscore=3.0"]}
+    ],
+    "related_services": []
+  },
+  "ground_truth": {
+    "root_cause": "A rolling deployment of catalog-service from 4.11.3 to 4.12.0. The connection refusals are the old pod draining between SIGTERM and the new pod passing its readiness probe. The service recovered on its own within 30 seconds and no remediation is required.",
+    "primary_service": "catalog-service",
+    "affected_services": ["catalog-service"],
+    "must_mention": ["deploy"],
+    "should_mention": ["restart", "rolling", "version", "expected", "recovered", "readiness"],
+    "must_not_conclude": ["outage requires immediate action", "database", "memory leak"],
+    "distractor_note": "The hardest class. 'connection refused' is a critical marker, so the pipeline escalates a non-event. Tests whether an RCA can say nothing is wrong."
+  }
+}
