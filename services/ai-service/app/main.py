@@ -99,6 +99,11 @@ CONSUMER_BATCH_SIZE = Gauge(
     "airs_ai_batch_size",
     "Number of messages fetched in the latest batch",
 )
+ENRICHED_PUBLISHED_TOTAL = Counter(
+    "airs_rca_enriched_published_total",
+    "Incidents published with a completed RCA for downstream delivery",
+    labelnames=("service",),
+)
 
 
 def active_provider_config() -> RuntimeLLMConfig:
@@ -675,6 +680,29 @@ async def process_incident(incident_payload: dict[str, Any]) -> None:
         severity=incident.severity.value,
         path=DETERMINISTIC if model_used == DETERMINISTIC else "llm",
     ).inc()
+
+    await announce_enriched(incident)
+
+
+async def announce_enriched(incident: Incident) -> None:
+    """Publish the finished RCA for anything that wants to deliver it onward.
+
+    ai-service deliberately does not deliver to external systems itself. It
+    does not know what a ticket is, and per ADR-007 it must not: outbound
+    destinations live behind the sink seam in connector-service.
+
+    Publishing instead of calling also means a slow or unreachable third party
+    cannot slow RCA generation, which is the same isolation every other stage
+    boundary buys.
+    """
+    if producer is None:
+        return
+    await produce_json(
+        producer,
+        settings.kafka.topics.enriched_incidents,
+        incident.model_dump(mode="json"),
+    )
+    ENRICHED_PUBLISHED_TOTAL.labels(service=incident.service).inc()
 
 
 async def publish_to_dlq(

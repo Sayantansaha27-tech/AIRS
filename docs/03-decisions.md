@@ -282,7 +282,8 @@ envelope. Not needed yet, so not built.
 
 ## ADR-007: Source and sink seams for outbound integrations
 
-**Status:** accepted, driven by planned ServiceNow work
+**Status:** accepted, and now implemented. See
+[10-servicenow.md](10-servicenow.md).
 
 ### Context
 
@@ -326,6 +327,31 @@ Two interfaces exist with fewer implementations than justify them today, which
 is a real smell. Accepted because the driver is named, dated and specific
 rather than hypothetical. If the ServiceNow work does not happen, these should
 be deleted rather than left as evidence of a plan.
+
+### What the seams turned out to require
+
+The integration landed shortly after, and two things about it were not obvious
+when this ADR was written.
+
+**Outbound delivery could not live in ai-service.** The intuitive design is a
+sink registry that ai-service consults after generating an RCA. That satisfies
+the letter of "no ServiceNow-specific assumption in core services" while
+missing the point, because the ServiceNow module ends up imported into
+ai-service's process either way.
+
+Instead ai-service publishes the enriched incident to `enriched-incidents-topic`
+and connector-service consumes it. ai-service does not import the sink seam at
+all. This also buys the isolation every other stage boundary buys: a
+hibernating ticketing system cannot slow RCA generation.
+
+**The `Incident` contract needed a provenance field.** `SourceRecord` and
+`SinkPayload` both carried `external_id`, but the only thing travelling between
+a source and a sink is the `Incident`, which had nowhere to put it. The ticket
+id was lost mid-pipeline and the sink had nothing to address. Adding optional
+`source_system` and `external_id` closed it.
+
+That is the general shape of the lesson: a seam at each end is not enough if
+the thing passing between them cannot carry what the seams agreed on.
 
 ---
 

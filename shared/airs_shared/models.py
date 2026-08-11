@@ -119,10 +119,35 @@ class Incident(BaseModel):
     related_services: list[str] = Field(default_factory=list)
     rca: RCAResult | None = None
 
+    # Provenance for incidents that did not originate in this pipeline.
+    # An incident pulled from an external system must be able to carry its
+    # identity there all the way to the sink that writes the RCA back, and the
+    # only thing travelling between a source and a sink is this model.
+    source_system: str | None = Field(default=None, max_length=64)
+    external_id: str | None = Field(default=None, max_length=128)
+
     @field_validator("tenant_id")
     @classmethod
     def validate_tenant_id(cls, value: str) -> str:
         return normalize_tenant(value)
+
+    @field_validator("source_system", "external_id")
+    @classmethod
+    def normalize_provenance(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @property
+    def is_external(self) -> bool:
+        """True when this incident was pulled from another system.
+
+        Externally sourced incidents skip detection and correlation, because
+        the grouping decision was already made elsewhere and re-deriving it
+        would produce a second, competing opinion about the same event.
+        """
+        return self.external_id is not None
 
 
 class IngestRequest(BaseModel):

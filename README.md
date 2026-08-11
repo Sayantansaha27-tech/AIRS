@@ -909,6 +909,7 @@ If you only read two, read `01` and `05`.
 | [07: Runbook](docs/07-runbook.md) | Install, upgrade, rollback, backup, on-call triage |
 | [08: Handoff](docs/08-handoff.md) | Operating this without its author |
 | [09: Postmortem](docs/09-postmortem.md) | What would be done differently |
+| [10: ServiceNow](docs/10-servicenow.md) | Pulling incidents in and writing the RCA back as a work note |
 | [11: Choosing a model](docs/11-models.md) | Provider and model selection, and how to add your own |
 
 ---
