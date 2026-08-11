@@ -68,9 +68,7 @@ def test_incident_still_gets_rca_with_ai_service_down(stack, restore_ai_service)
     # Recovery: the queued incident is picked up and enriched.
     stack.start_ai_service()
     enriched = stack.wait_until(
-        lambda: next(
-            (i for i in stack.incidents_for(service) if rca_of(i) is not None), None
-        ),
+        lambda: next((i for i in stack.incidents_for(service) if rca_of(i) is not None), None),
         timeout=180,
         what="the queued incident to receive an RCA after recovery",
     )
@@ -133,9 +131,7 @@ def test_deterministic_rca_when_the_model_is_unreachable(stack):
         stack.ingest(critical_burst(service))
 
         enriched = stack.wait_until(
-            lambda: next(
-                (i for i in stack.incidents_for(service) if rca_of(i) is not None), None
-            ),
+            lambda: next((i for i in stack.incidents_for(service) if rca_of(i) is not None), None),
             timeout=180,
             what="a deterministic RCA with the model unreachable",
         )
@@ -144,9 +140,7 @@ def test_deterministic_rca_when_the_model_is_unreachable(stack):
         assert "fallback" in rca["explanation"].lower(), (
             "the RCA must say it is a fallback rather than passing as analysis"
         )
-        assert stack.dlq_depth() == dlq_before, (
-            "an unreachable model must degrade, not dead-letter"
-        )
+        assert stack.dlq_depth() == dlq_before, "an unreachable model must degrade, not dead-letter"
     finally:
         if restore:
             httpx.post(f"{stack.gateway}/v1/llm/config", json=restore, timeout=10.0)
