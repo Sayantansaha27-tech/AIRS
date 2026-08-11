@@ -360,12 +360,20 @@ docker exec -it airs-ollama ollama pull rjmalagon/qwen2:1.5b-instruct
 curl -X POST http://localhost:8001/ingest \
   -H 'Content-Type: application/json' \
   -d '{
-    "timestamp": "2026-03-05T14:00:00Z",
-    "service": "payments-service",
-    "level": "error",
-    "message": "connection refused: postgres-primary:5432"
+    "logs": [
+      {
+        "timestamp": "2026-03-05T14:00:00Z",
+        "service": "payments-service",
+        "level": "error",
+        "message": "connection refused: postgres-primary:5432"
+      }
+    ]
   }'
 ```
+
+`/ingest` always takes a batch. A bare log object is rejected with a 422.
+Events that fail normalization are published to the DLQ and the rest of the
+batch still proceeds, so a partial success returns the accepted count.
 
 ### Manually analyze a log batch
 
@@ -409,8 +417,18 @@ curl -X POST http://localhost:8000/v1/llm/config \
 ```bash
 curl -X POST http://localhost:8000/v1/ingest/simulate \
   -H 'Content-Type: application/json' \
-  -d '{"service": "checkout-service", "count": 500, "error_rate": 0.4}'
+  -d '{
+    "service": "checkout-service",
+    "pattern": "connection refused: postgres-primary:5432",
+    "level": "error",
+    "count": 500,
+    "rate_per_second": 50
+  }'
 ```
+
+`service` and `pattern` are both required. The generator emits `count` copies
+of `pattern` at `rate_per_second`, so this call holds the request open for
+about 10 seconds before responding.
 
 ### Stream incidents in real time (SSE)
 
@@ -648,8 +666,6 @@ This means the schema and infrastructure are ready for a multi-tenant SaaS deplo
 │       └── schema_registry.py       # Built-in topic schema registry
 ├── ui/                               # Next.js + Tailwind frontend
 ├── tests/                            # Pytest suite
-├── samples/
-│   └── logs.jsonl                    # Demo log dataset
 ├── docker-compose.yml                # Full stack (with healthchecks)
 ├── pyproject.toml                    # Python project + ruff/mypy config
 ├── requirements.txt                  # Pinned Python dependencies
