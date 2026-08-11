@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import logging
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from redis import asyncio as redis_async
 
 settings = get_settings()
 app = FastAPI(title="AIRS AI Service")
+logger = logging.getLogger("ai-service")
 
 
 @dataclass
@@ -524,7 +526,14 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
     if not use_llm:
         return deterministic_fallback(context), "deterministic"
 
-    provider = build_provider(active, settings)
+    # Provider construction can fail on misconfiguration (for example, provider
+    # set to openai with no API key present). That is a model-availability
+    # problem like any other and must not deny the incident an RCA.
+    try:
+        provider = build_provider(active, settings)
+    except Exception:  # noqa: BLE001
+        logger.exception("LLM provider unavailable, using deterministic RCA")
+        return deterministic_fallback(context), "deterministic"
 
     try:
         llm_payload = await generate_with_retries(provider, prompt, context, model_name)
@@ -627,7 +636,8 @@ async def consumer_loop() -> None:
                         )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("RCA consumer loop error: %s", exc)
             await asyncio.sleep(1)
 
 
