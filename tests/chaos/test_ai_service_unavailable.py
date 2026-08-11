@@ -108,13 +108,17 @@ def test_no_duplicate_incident_after_recovery(stack, restore_ai_service):
     assert len(after) == len(during), "one RCA per incident, not one incident per RCA"
 
 
-def test_deterministic_rca_when_the_model_is_unreachable(stack):
-    """ai-service up, model unreachable: the fallback must engage.
+def test_a_broken_tier_falls_through_to_a_working_one(stack):
+    """A model that does not exist must not cost the incident its analysis.
 
-    Pointing the provider at a model that does not exist exercises the same
-    path as an Ollama outage without stopping a container.
+    Routing asks a provider for a tier, and the cascade tries the other tier
+    before giving up. Pinning the primary tier to a nonexistent model should
+    therefore still produce a real RCA, from the economy model.
+
+    This test previously asserted the opposite, because before per-provider
+    tiers the cascade had nowhere sensible to fall to.
     """
-    service = f"chaos-model-{uuid.uuid4().hex[:8]}"
+    service = f"chaos-tier-{uuid.uuid4().hex[:8]}"
 
     import httpx
 
@@ -132,8 +136,34 @@ def test_deterministic_rca_when_the_model_is_unreachable(stack):
 
         enriched = stack.wait_until(
             lambda: next((i for i in stack.incidents_for(service) if rca_of(i) is not None), None),
-            timeout=180,
-            what="a deterministic RCA with the model unreachable",
+            timeout=240,
+            what="an RCA after the primary tier failed",
+        )
+        assert rca_of(enriched)["root_cause"], "the contract must be populated either way"
+        assert stack.dlq_depth() == dlq_before, "a broken tier must degrade, not dead-letter"
+    finally:
+        if restore:
+            httpx.post(f"{stack.gateway}/v1/llm/config", json=restore, timeout=10.0)
+
+
+def test_deterministic_rca_when_no_model_is_reachable(stack):
+    """Every tier gone: the deterministic fallback must engage and say so.
+
+    Ollama is stopped, so neither tier can answer. This is the claim the whole
+    design rests on, and it is the only configuration that genuinely reaches
+    the deterministic path.
+    """
+    service = f"chaos-model-{uuid.uuid4().hex[:8]}"
+    dlq_before = stack.dlq_depth()
+
+    stack.compose("stop", "ollama")
+    try:
+        stack.ingest(critical_burst(service))
+
+        enriched = stack.wait_until(
+            lambda: next((i for i in stack.incidents_for(service) if rca_of(i) is not None), None),
+            timeout=240,
+            what="a deterministic RCA with no model reachable",
         )
         rca = rca_of(enriched)
         assert rca["root_cause"], "the fallback must still populate the contract"
@@ -142,8 +172,7 @@ def test_deterministic_rca_when_the_model_is_unreachable(stack):
         )
         assert stack.dlq_depth() == dlq_before, "an unreachable model must degrade, not dead-letter"
     finally:
-        if restore:
-            httpx.post(f"{stack.gateway}/v1/llm/config", json=restore, timeout=10.0)
+        stack.compose("start", "ollama")
 
 
 def test_ingestion_stays_available_throughout(stack, restore_ai_service):
