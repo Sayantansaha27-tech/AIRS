@@ -223,3 +223,82 @@ async def test_core_services_do_not_import_the_seams():
     for service in ("ai-service", "correlation-service", "anomaly-service"):
         source = (repo / "services" / service / "app" / "main.py").read_text()
         assert "servicenow" not in source.lower(), f"{service} knows about ServiceNow"
+
+
+# ------------------------------------------------- external incident identity
+
+
+def test_incident_carries_external_identity():
+    """The join between the two seams.
+
+    SourceRecord and SinkPayload both have external_id, but the only thing
+    travelling between them on Kafka is the Incident. Without this the ticket
+    id is lost mid-pipeline and the sink has nothing to address.
+    """
+    from airs_shared.models import Incident, Severity
+
+    incident = Incident(
+        severity=Severity.critical,
+        service="orders-service",
+        summary="pulled from ServiceNow",
+        source_system="servicenow",
+        external_id="a1b2c3d4e5f6",
+    )
+    assert incident.is_external is True
+
+    round_tripped = Incident.model_validate(incident.model_dump(mode="json"))
+    assert round_tripped.external_id == "a1b2c3d4e5f6"
+    assert round_tripped.source_system == "servicenow"
+
+
+def test_pipeline_incidents_are_not_external():
+    from airs_shared.models import Incident, Severity
+
+    incident = Incident(severity=Severity.warning, service="s", summary="x")
+    assert incident.is_external is False
+    assert incident.external_id is None
+
+
+def test_provenance_fields_are_optional_and_backward_compatible():
+    """Existing incident documents have neither field and must still load."""
+    from airs_shared.models import Incident
+
+    legacy = {
+        "id": "inc-1",
+        "severity": "warning",
+        "service": "orders-service",
+        "summary": "written before provenance existed",
+    }
+    assert Incident.model_validate(legacy).external_id is None
+
+
+def test_sink_payload_is_built_from_an_enriched_incident():
+    from airs_shared.models import Incident, RCAResult, Severity
+
+    incident = Incident(
+        severity=Severity.critical,
+        service="orders-service",
+        summary="s",
+        source_system="servicenow",
+        external_id="a1b2c3d4e5f6",
+        rca=RCAResult(
+            root_cause="pool exhausted",
+            confidence=0.8,
+            explanation="e",
+            suggested_fix="f",
+        ),
+    )
+
+    payload = SinkPayload.from_incident(incident)
+    assert payload.external_id == "a1b2c3d4e5f6"
+    assert payload.source_system == "servicenow"
+    assert payload.severity == "critical"
+    assert payload.rca["root_cause"] == "pool exhausted"
+
+
+def test_an_incident_without_rca_cannot_be_delivered():
+    from airs_shared.models import Incident, Severity
+
+    incident = Incident(severity=Severity.warning, service="s", summary="x")
+    with pytest.raises(ValueError, match="no RCA"):
+        SinkPayload.from_incident(incident)

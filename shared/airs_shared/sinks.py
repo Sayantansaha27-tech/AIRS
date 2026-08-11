@@ -42,8 +42,30 @@ class SinkPayload:
     rca: dict[str, Any]
     external_id: str | None = None
     """Identity in the destination system, carried through from the source."""
+    source_system: str | None = None
     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_incident(cls, incident: Any) -> SinkPayload:
+        """Build a payload from an enriched Incident.
+
+        This is the join between the two seams: whatever a source recorded as
+        the originating identity travels on the incident and arrives here, so a
+        sink can address the right record without knowing where it came from.
+        """
+        if incident.rca is None:
+            raise ValueError("cannot deliver an incident that has no RCA")
+        return cls(
+            incident_id=incident.id,
+            tenant_id=incident.tenant_id,
+            service=incident.service,
+            severity=str(getattr(incident.severity, "value", incident.severity)),
+            rca=incident.rca.model_dump(mode="json"),
+            external_id=incident.external_id,
+            source_system=incident.source_system,
+            occurred_at=incident.updated_at,
+        )
 
     @property
     def idempotency_key(self) -> str:
