@@ -129,11 +129,11 @@ written, in the shape the newer version wrote them. If the upgrade changed the
 incident schema, roll the index forward or reindex rather than assuming the
 old code can read new documents.
 
-**Data loss during an ungraceful restart.** Consumers use Kafka auto-commit,
-so offsets advance on a timer regardless of whether processing finished. A
-`kill -9` mid-batch loses the in-flight records permanently, and they will not
-appear in the DLQ because they never failed. Always stop gracefully. Full
-explanation in [05-failure-modes.md](05-failure-modes.md).
+**An ungraceful restart replays rather than losing.** Consumers commit only
+after a batch is handled, so a `kill -9` mid-batch causes those records to be
+reprocessed on restart. Correlation deduplicates the replay against a durable
+key, so no duplicate incident appears. Still stop gracefully where you can:
+correlation flushes its open clusters on SIGTERM and cannot on SIGKILL.
 
 ---
 
@@ -361,17 +361,25 @@ curl -X PUT localhost:8000/v1/topology \
 
 ### Drain the DLQ
 
-There is no tooling for this. The DLQ is write-only, and draining is manual:
+See what is in there, grouped by source topic and failure reason:
 
 ```bash
-docker exec airs-kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic airs-dlq-topic --from-beginning --max-messages 100
+docker compose exec ai-service python /app/tools/dlq.py peek
 ```
 
-Inspect `failure_reason`, fix the cause, and re-ingest the `payload` field
-through `POST /ingest` if the events still matter. Recorded as a gap in
-[01-scope-and-non-goals.md](01-scope-and-non-goals.md).
+Peeking joins no consumer group and commits no offset, so it is safe to run
+repeatedly and cannot affect any service's position.
+
+**Fix the cause first.** A replayed event that is still malformed fails again
+and returns to the DLQ. Then check what a drain would do, and do it:
+
+```bash
+docker compose exec ai-service python /app/tools/dlq.py drain --dry-run
+docker compose exec ai-service python /app/tools/dlq.py drain
+```
+
+`--topic` limits the replay to one source topic, which is what you want when
+one stage had a bad hour and the others were fine.
 
 ### Switch LLM provider without a restart
 

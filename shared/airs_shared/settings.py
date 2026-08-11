@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -28,15 +27,78 @@ class OpenSearchSettings(BaseModel):
     sources_index: str = "airs-sources"
 
 
+DETERMINISTIC = "deterministic"
+
+
+class ProviderSettings(BaseModel):
+    """One place a model can be reached.
+
+    `kind` selects the adapter that speaks to it. Most inference servers speak
+    the OpenAI chat-completions API, so `openai_compatible` covers OpenAI,
+    vLLM, LM Studio, llama.cpp, Together, Groq, OpenRouter, DeepSeek, Mistral
+    and anything else that implements it: those are configuration, not code.
+
+    `models` maps a **tier name** to a model id. Tiers are what routing selects,
+    so a provider owns its own answer to "what is the capable model here" and
+    "what is the cheap one". That is what makes switching provider coherent:
+    both tiers move together instead of one being left pointing at a model the
+    new provider has never heard of.
+    """
+
+    kind: str = "openai_compatible"
+    base_url: str = ""
+    api_key_env: str = ""
+    models: dict[str, str] = Field(default_factory=dict)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
+    def model_for(self, tier: str) -> str | None:
+        return self.models.get(tier)
+
+
+def _default_providers() -> dict[str, ProviderSettings]:
+    return {
+        "ollama": ProviderSettings(
+            kind="ollama",
+            base_url="http://localhost:11434",
+            models={"primary": "qwen2.5:7b-instruct", "economy": "qwen2.5:1.5b-instruct"},
+        ),
+        "openai": ProviderSettings(
+            kind="openai_compatible",
+            base_url="https://api.openai.com/v1",
+            api_key_env="OPENAI_API_KEY",
+            models={"primary": "gpt-4.1", "economy": "gpt-4.1-mini"},
+        ),
+        "anthropic": ProviderSettings(
+            kind="anthropic",
+            base_url="https://api.anthropic.com/v1",
+            api_key_env="ANTHROPIC_API_KEY",
+            models={"primary": "claude-sonnet-5", "economy": "claude-haiku-4-5-20251001"},
+        ),
+    }
+
+
 class LLMSettings(BaseModel):
-    provider: Literal["ollama", "openai"] = "ollama"
-    model: str = "qwen2.5:7b-instruct"
-    fallback_model: str = "rjmalagon/qwen2:1.5b-instruct"
+    # Free-form on purpose. A closed enum here would mean adding a provider
+    # requires a code change, which is the thing this design exists to avoid.
+    provider: str = "ollama"
     timeout_seconds: int = 8
     retries: int = 2
-    ollama_base_url: str = "http://localhost:11434"
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_api_key_env: str = "OPENAI_API_KEY"
+
+    # Severity to tier. A tier of "deterministic" skips the model entirely.
+    routing: dict[str, str] = Field(
+        default_factory=lambda: {
+            "critical": "primary",
+            "warning": "economy",
+            "info": DETERMINISTIC,
+        }
+    )
+    providers: dict[str, ProviderSettings] = Field(default_factory=_default_providers)
+
+    def active(self, provider_name: str | None = None) -> ProviderSettings | None:
+        return self.providers.get(provider_name or self.provider)
+
+    def tier_for(self, severity: str) -> str:
+        return self.routing.get(severity.lower(), DETERMINISTIC)
 
 
 class PipelineSettings(BaseModel):

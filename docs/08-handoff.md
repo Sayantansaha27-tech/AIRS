@@ -94,9 +94,10 @@ DLQ growth across every topic at once. Procedure in the runbook.
 silently degrades to deterministic. Not an outage, but the system stops
 providing its main value. `docker exec airs-ollama ollama list`.
 
-**3. Fingerprint over-specificity.** A team changes a log format to embed a
-request id, and deduplication stops working for that service. Symptom is one
-service producing far more incidents than usual with near-identical timelines.
+**3. A log format that defeats templatizing.** Messages are masked before
+fingerprinting, but a format that varies in a way the patterns do not cover
+still splits one signal into many. Symptom is one service producing far more
+incidents than usual with near-identical timelines.
 
 **4. A detection rule matching too broadly.** Someone adds a keyword rule for
 "error". Everything becomes a critical anomaly. Always back-test with
@@ -110,12 +111,15 @@ Do not spend a day looking for these. They are not hidden, they do not exist,
 and [01-scope-and-non-goals.md](01-scope-and-non-goals.md) explains why.
 
 - **Authentication.** None, anywhere. `tenant_id` is an unverified header.
-- **DLQ recovery.** Events land there and nothing consumes them.
-- **Exactly-once delivery.** Auto-commit means a hard kill loses in-flight
-  records without dead-lettering them.
-- **Redis usage.** It is connected, health-checked and gated on at startup, and
-  read by nothing. Do not go looking for the cache.
-- **The RCA feedback loop.** Feedback is stored and never read.
+- **Automatic DLQ recovery.** `tools/dlq.py` drains it when you ask; nothing
+  drains it on its own, because retrying a permanently bad event forever is
+  worse than leaving it.
+- **Exactly-once delivery.** You get at-least-once: a crash replays, and
+  correlation deduplicates the replay.
+- **An RCA cache in Redis.** Redis now holds correlation deduplication keys,
+  but nothing caches RCA results.
+- **Learning from feedback.** Corrections are retrieved into the RCA context
+  for later incidents on the same service. Nothing trains or tunes.
 - **Topology inference.** The service graph is declared, not learned.
 
 ---

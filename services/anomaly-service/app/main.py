@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import (
@@ -149,8 +150,50 @@ CONSUMER_BATCH_SIZE = Gauge(
 )
 
 
+# Ordered most specific first, so a UUID is masked as a UUID rather than being
+# picked apart into hex runs and digits.
+TEMPLATE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I),
+        "<uuid>",
+    ),
+    (
+        # Case-insensitive because templatizing happens after lowercasing, so
+        # the T separator and Z suffix arrive here already lowered.
+        re.compile(
+            r"\b\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?",
+            re.I,
+        ),
+        "<ts>",
+    ),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"), "<ip>"),
+    (re.compile(r"\b0x[0-9a-f]+\b", re.I), "<hex>"),
+    (re.compile(r"\b[0-9a-f]{12,}\b", re.I), "<hash>"),
+    (re.compile(r"\b\d+(?:\.\d+)?(?:ms|s|us|ns|kb|mb|gb|%)\b", re.I), "<qty>"),
+    (re.compile(r"\b\d+\b"), "<n>"),
+)
+
+
+def templatize(message: str) -> str:
+    """Collapse a log line to its shape by masking the parts that vary.
+
+        timeout while creating order req_id=8a3f duration=1204ms
+        timeout while creating order req_id=<hash> duration=<qty>
+
+    Without this, deduplication silently stops working for any service that
+    embeds a request id, row id or duration in its messages: the same failure
+    repeated 500 times produces 500 distinct fingerprints, and an incident
+    fills with signals that are really one signal. Documented as a known
+    limitation in 05-failure-modes.md before this existed.
+    """
+    templated = message.lower().strip()
+    for pattern, replacement in TEMPLATE_PATTERNS:
+        templated = pattern.sub(replacement, templated)
+    return templated
+
+
 def build_fingerprint(tenant_id: str, service: str, message: str) -> str:
-    key = f"{tenant_id}:{service}:{message.lower().strip()}"
+    key = f"{tenant_id}:{service}:{templatize(message)}"
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -501,6 +544,8 @@ async def consume_loop() -> None:
                             partition=tp.partition,
                             offset=message.offset,
                         )
+            if records:
+                await commit_safely(consumer, where="anomaly-service")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -516,12 +561,10 @@ async def startup() -> None:
     ensure_index(os_client, SUPPRESSIONS_INDEX)
     await refresh_assets_if_needed(force=True)
 
-    consumer = AIOKafkaConsumer(
+    consumer = build_consumer(
         settings.kafka.topics.processed_logs,
         bootstrap_servers=settings.kafka.bootstrap_servers,
         group_id="airs-anomaly-service",
-        enable_auto_commit=True,
-        auto_offset_reset="latest",
     )
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka.bootstrap_servers)
 

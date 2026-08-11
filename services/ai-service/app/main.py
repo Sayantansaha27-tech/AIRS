@@ -12,9 +12,11 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
+import ai_providers as providers
 import httpx
-from ai_providers import BaseLLMProvider, OllamaProvider, OpenAIProvider
+from ai_providers import BaseLLMProvider, ProviderConfigError
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
 from airs_shared.models import (
@@ -28,7 +30,7 @@ from airs_shared.models import (
 from airs_shared.monitoring import metrics_response
 from airs_shared.normalize import normalize_log
 from airs_shared.opensearch import build_client, ensure_index, upsert_doc
-from airs_shared.settings import AIRSSettings, get_settings
+from airs_shared.settings import DETERMINISTIC, AIRSSettings, get_settings
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Gauge, Histogram
@@ -100,31 +102,35 @@ CONSUMER_BATCH_SIZE = Gauge(
 
 
 def active_provider_config() -> RuntimeLLMConfig:
+    """The provider and pinned model currently in force.
+
+    With nothing pinned at runtime, `model` is empty and each tier resolves
+    through the provider's own `models` map. That is what keeps routing
+    coherent across a provider switch.
+    """
     if runtime_llm_config is not None:
         return runtime_llm_config
-    return RuntimeLLMConfig(provider=settings.llm.provider, model=settings.llm.model)
+    return RuntimeLLMConfig(provider=settings.llm.provider, model="")
 
 
 def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings) -> BaseLLMProvider:
-    if active.provider == "ollama":
-        return OllamaProvider(
-            base_url=cfg.llm.ollama_base_url,
-            model=active.model,
-            timeout_seconds=cfg.llm.timeout_seconds,
-        )
+    """Construct the adapter for the active provider at the requested model.
 
-    if active.provider == "openai":
-        api_key = os.getenv(cfg.llm.openai_api_key_env)
-        if not api_key:
-            raise RuntimeError(f"Missing environment variable: {cfg.llm.openai_api_key_env}")
-        return OpenAIProvider(
-            base_url=cfg.llm.openai_base_url,
-            api_key=api_key,
-            model=active.model,
-            timeout_seconds=cfg.llm.timeout_seconds,
+    Which adapter is decided by the provider's declared `kind`, so a new
+    OpenAI-compatible endpoint is a config entry rather than a code change.
+    """
+    provider_cfg = cfg.llm.active(active.provider)
+    if provider_cfg is None:
+        raise ProviderConfigError(
+            f"Unknown provider '{active.provider}'. Configured: "
+            f"{', '.join(sorted(cfg.llm.providers)) or 'none'}"
         )
-
-    raise RuntimeError(f"Unsupported provider: {active.provider}")
+    return providers.build(
+        provider_name=active.provider,
+        cfg=provider_cfg,
+        model=active.model,
+        timeout_seconds=cfg.llm.timeout_seconds,
+    )
 
 
 def severity_name(value: Any) -> str:
@@ -147,18 +153,27 @@ def tenant_scope_filter(tenant_id: str) -> dict[str, Any]:
     return {"term": {"tenant_id": tenant_id}}
 
 
-def cheaper_model_for(active: RuntimeLLMConfig) -> str:
-    """The lower-cost tier for the provider that is currently active.
+def model_for_tier(active: RuntimeLLMConfig, tier: str) -> str | None:
+    """The model this provider uses for a tier.
 
-    settings.llm.fallback_model names an Ollama model. Using it verbatim after a
-    runtime switch to OpenAI would send an Ollama model name to the OpenAI API,
-    so it only applies while the active provider is the one it was configured
-    for. For any other provider, staying on the active model is correct: the
-    routing decision that still holds is the deterministic tier below.
+    Each provider declares its own tiers, so switching provider moves every
+    tier together. The previous design named one model globally and one
+    fallback model globally, which meant a runtime switch left the low-cost
+    tier pointing at a model the new provider had never heard of.
     """
-    if active.provider == settings.llm.provider:
-        return settings.llm.fallback_model
-    return active.model
+    if tier == DETERMINISTIC:
+        return None
+
+    provider_cfg = settings.llm.active(active.provider)
+    if provider_cfg is None:
+        return None
+
+    # An explicit runtime model overrides the provider's primary tier only, so
+    # POST /v1/llm/config still lets you pin one model without silently
+    # redirecting the economy tier at it too.
+    if active.model and tier == "primary":
+        return active.model
+    return provider_cfg.model_for(tier) or active.model or None
 
 
 def select_model_for_context(context: dict[str, Any], active: RuntimeLLMConfig) -> tuple[str, bool]:
@@ -166,14 +181,26 @@ def select_model_for_context(context: dict[str, Any], active: RuntimeLLMConfig) 
     if isinstance(force_model, str) and force_model.strip():
         return force_model.strip(), True
 
-    severity = severity_name(context.get("severity"))
-    if severity == "critical":
-        return active.model, True
-    if severity == "warning":
-        return cheaper_model_for(active), True
+    tier = settings.llm.tier_for(severity_name(context.get("severity")))
+    model = model_for_tier(active, tier)
+    if model is None:
+        # Either the tier is deterministic by policy, or the provider has no
+        # model for it. Both mean: do not call a model.
+        return DETERMINISTIC, False
+    return model, True
 
-    # Low-severity contexts default to deterministic fallback for latency/cost control.
-    return "deterministic", False
+
+def fallback_tier_model(active: RuntimeLLMConfig, current_model: str) -> str | None:
+    """The next model to try after `current_model` failed.
+
+    Ordered cheapest-last, so a failing primary drops to economy rather than
+    retrying something equally expensive.
+    """
+    for tier in ("economy", "primary"):
+        candidate = model_for_tier(active, tier)
+        if candidate and candidate != current_model:
+            return candidate
+    return None
 
 
 def enrich_with_hybrid_confidence(
@@ -273,6 +300,60 @@ def fetch_source_metadata(tenant_id: str, service: str) -> dict[str, Any]:
         }
     except Exception:  # noqa: BLE001
         return {}
+
+
+def fetch_operator_corrections(tenant_id: str, service: str) -> list[dict[str, Any]]:
+    """Past RCAs a human marked wrong, with what they said instead.
+
+    This is what closes the feedback loop. Ratings were previously written to
+    airs-rca-feedback and read by nothing, so the features table called it a
+    feedback loop when it was only collection.
+
+    Only corrected feedback is returned, because "this was unhelpful" with no
+    correction tells a model nothing actionable. A named alternative does.
+    """
+    query = {
+        "query": {
+            "bool": {
+                "filter": [
+                    tenant_scope_filter(tenant_id),
+                    {"terms": {"rating": ["incorrect", "not_helpful"]}},
+                    {"exists": {"field": "correction"}},
+                    {
+                        "bool": {
+                            "should": [
+                                {"term": {"service.keyword": service}},
+                                {"term": {"service": service}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    },
+                ]
+            }
+        },
+        "size": 3,
+        "sort": [{"submitted_at": {"order": "desc"}}],
+    }
+
+    try:
+        result = os_client.search(index=FEEDBACK_INDEX, body=query)
+    except Exception:  # noqa: BLE001
+        return []
+
+    corrections: list[dict[str, Any]] = []
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit.get("_source", {})
+        correction = str(source.get("correction") or "").strip()
+        if not correction:
+            continue
+        corrections.append(
+            {
+                "previously_concluded": (source.get("rca") or {}).get("root_cause"),
+                "operator_said": correction,
+                "rating": source.get("rating"),
+            }
+        )
+    return corrections
 
 
 def fetch_recent_incidents(
@@ -469,6 +550,7 @@ def build_incident_context(
             incident.service,
             exclude_id=incident.id,
         ),
+        "operator_corrections": fetch_operator_corrections(incident.tenant_id, incident.service),
         "active_suppressions": fetch_active_suppressions(
             incident.tenant_id,
             incident.service,
@@ -505,6 +587,7 @@ def build_manual_context(logs: list[dict[str, Any]], notes: str | None = None) -
         "anomalies": anomalies,
         "source_metadata": fetch_source_metadata(tenant_id, service),
         "recent_incidents": fetch_recent_incidents(tenant_id, service),
+        "operator_corrections": fetch_operator_corrections(tenant_id, service),
         "active_suppressions": fetch_active_suppressions(tenant_id, service, datetime.now(UTC)),
         "topology": fetch_topology(tenant_id, service),
     }
@@ -524,7 +607,7 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
     RCA_ROUTED_MODEL_TOTAL.labels(model=model_name, severity=severity).inc()
 
     if not use_llm:
-        return deterministic_fallback(context), "deterministic"
+        return deterministic_fallback(context), DETERMINISTIC
 
     # Provider construction can fail on misconfiguration (for example, provider
     # set to openai with no API key present). That is a model-availability
@@ -533,7 +616,7 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
         provider = build_provider(active, settings)
     except Exception:  # noqa: BLE001
         logger.exception("LLM provider unavailable, using deterministic RCA")
-        return deterministic_fallback(context), "deterministic"
+        return deterministic_fallback(context), DETERMINISTIC
 
     try:
         llm_payload = await generate_with_retries(provider, prompt, context, model_name)
@@ -542,8 +625,8 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
     except Exception:  # noqa: BLE001
         pass
 
-    fallback_model = settings.llm.fallback_model
-    if fallback_model != model_name:
+    fallback_model = fallback_tier_model(active, model_name)
+    if fallback_model:
         try:
             fallback_payload = await generate_with_retries(
                 provider,
@@ -556,7 +639,7 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
         except Exception:  # noqa: BLE001
             pass
 
-    return deterministic_fallback(context), "deterministic"
+    return deterministic_fallback(context), DETERMINISTIC
 
 
 def get_incident_or_404(incident_id: str) -> Incident:
@@ -590,7 +673,7 @@ async def process_incident(incident_payload: dict[str, Any]) -> None:
     RCA_SUCCESS_TOTAL.labels(
         service=incident.service,
         severity=incident.severity.value,
-        path="deterministic" if model_used == "deterministic" else "llm",
+        path=DETERMINISTIC if model_used == DETERMINISTIC else "llm",
     ).inc()
 
 
@@ -638,6 +721,8 @@ async def consumer_loop() -> None:
                             partition=tp.partition,
                             offset=message.offset,
                         )
+            if records:
+                await commit_safely(consumer, where="ai-service")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -645,22 +730,47 @@ async def consumer_loop() -> None:
             await asyncio.sleep(1)
 
 
+#: Per-kind liveness probe: path to GET, and how to authenticate it.
+HEALTH_PROBES: dict[str, tuple[str, str]] = {
+    "ollama": ("/api/tags", "none"),
+    "openai_compatible": ("/models", "bearer"),
+    "anthropic": ("/models", "x-api-key"),
+}
+
+
 async def llm_healthcheck() -> bool:
+    """Whether the active provider answers.
+
+    Probed by `kind` rather than by provider name, so every OpenAI-compatible
+    endpoint is covered by one entry. A provider whose kind has no probe is
+    reported healthy rather than unhealthy: an unknown probe is our ignorance,
+    not evidence the model is down, and the fallback covers us either way.
+    """
     active = active_provider_config()
-    timeout = settings.llm.timeout_seconds
+    provider_cfg = settings.llm.active(active.provider)
+    if provider_cfg is None:
+        return False
+
+    probe = HEALTH_PROBES.get(provider_cfg.kind)
+    if probe is None:
+        return True
+
+    path, auth = probe
+    headers = dict(provider_cfg.extra_headers)
+    if auth != "none":
+        api_key = os.getenv(provider_cfg.api_key_env, "") if provider_cfg.api_key_env else ""
+        if not api_key and provider_cfg.api_key_env:
+            return False
+        if api_key:
+            if auth == "bearer":
+                headers["Authorization"] = f"Bearer {api_key}"
+            else:
+                headers["x-api-key"] = api_key
+                headers["anthropic-version"] = "2023-06-01"
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if active.provider == "ollama":
-                resp = await client.get(f"{settings.llm.ollama_base_url.rstrip('/')}/api/tags")
-            else:
-                api_key = os.getenv(settings.llm.openai_api_key_env)
-                if not api_key:
-                    return False
-                resp = await client.get(
-                    f"{settings.llm.openai_base_url.rstrip('/')}/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                )
+        async with httpx.AsyncClient(timeout=settings.llm.timeout_seconds) as client:
+            resp = await client.get(f"{provider_cfg.base_url.rstrip('/')}{path}", headers=headers)
         return resp.status_code < 400
     except Exception:  # noqa: BLE001
         return False
@@ -675,12 +785,10 @@ async def startup() -> None:
     ensure_index(os_client, TOPOLOGY_INDEX)
     ensure_index(os_client, SUPPRESSIONS_INDEX)
 
-    consumer = AIOKafkaConsumer(
+    consumer = build_consumer(
         settings.kafka.topics.incidents,
         bootstrap_servers=settings.kafka.bootstrap_servers,
         group_id="airs-ai-service",
-        enable_auto_commit=True,
-        auto_offset_reset="latest",
     )
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka.bootstrap_servers)
     await consumer.start()
@@ -770,8 +878,14 @@ async def metrics() -> object:
 async def update_llm_config(payload: LLMConfigRequest) -> dict[str, str]:
     global runtime_llm_config
 
-    if payload.provider not in {"ollama", "openai"}:
-        raise HTTPException(status_code=400, detail="Unsupported provider")
+    if payload.provider not in settings.llm.providers:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown provider '{payload.provider}'. Configured: "
+                f"{', '.join(sorted(settings.llm.providers))}"
+            ),
+        )
 
     runtime_llm_config = RuntimeLLMConfig(provider=payload.provider, model=payload.model)
     return {"provider": payload.provider, "model": payload.model}

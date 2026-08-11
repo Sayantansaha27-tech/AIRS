@@ -205,14 +205,19 @@ alert compares them.
 **Mitigation today.** Drain gracefully. `docker compose stop` sends SIGTERM
 and the shutdown hooks flush correlation clusters.
 
-**Real fix, not implemented.** `enable_auto_commit=False` with an explicit
-commit after each batch is fully handled. That converts at-most-once into
-at-least-once, which then requires the handlers to be idempotent. Indexing is
-already idempotent by document id. Incident creation is not: replaying an
-anomaly would open a second incident. Doing this properly means the dedup
-fingerprint becoming a durable idempotency key, which is a larger change than
-the flag suggests. That is why it is deferred rather than done, and it is the
-first thing to fix if this ever handles data that matters.
+**Fixed.** Consumers now commit only after a batch is fully handled, which
+converts at-most-once into at-least-once.
+
+That change alone would not have been safe. At-least-once means a crash after
+processing but before committing replays the batch, and replaying an anomaly
+would have opened a second incident. So it landed together with a durable
+idempotency key: correlation records each anomaly id in Redis before
+processing it, and a replayed anomaly is skipped and counted in
+`airs_anomalies_replayed_total`. Indexing was already idempotent by document
+id.
+
+`auto_offset_reset` also moved from `latest` to `earliest`, so a new consumer
+group no longer silently skips everything already on the topic.
 
 ---
 
@@ -271,8 +276,18 @@ messages.
 **Mitigation.** Normalize the message before it reaches AIRS, or write a
 detection rule matching the stable prefix.
 
-**Real fix, not implemented.** Templatize messages before fingerprinting, by
-masking numeric and hex runs. Cheap, and not built.
+**Fixed.** Messages are templatized before fingerprinting: UUIDs, timestamps,
+IP addresses, hex, long hashes, quantities with units and bare numbers are
+masked to placeholders, so the same failure with a different request id is one
+signal rather than many.
+
+    timeout while creating order req_id=8a3f2b1c9d0e duration=1204ms
+    timeout while creating order req_id=<hash> duration=<qty>
+
+The remaining risk inverts: templatizing too aggressively would collapse
+genuinely different failures into one fingerprint. The patterns are
+deliberately conservative and there is a test asserting that unrelated
+messages still differ.
 
 ---
 
@@ -299,9 +314,17 @@ entire event loop for its duration.
 **Detection.** Throughput plateaus well below CPU saturation. Numbers in
 [06-evals.md](06-evals.md).
 
-**Mitigation.** None at runtime. This is structural: it needs the async
-OpenSearch client, `refresh=False` with an explicit refresh interval, and
-bulk indexing instead of per-document writes.
+**Fixed for the two stages that mattered.** log-processor and
+correlation-service now use the async OpenSearch client, and log-processor
+indexes a whole Kafka batch in one bulk request with `refresh=False`.
+Sustained throughput went from roughly 200 events/sec to roughly 1,000, and
+correlation-service stays responsive at rates where it previously stopped
+answering its own health endpoint.
+
+**Still present in api-gateway.** `GET /v1/stream` runs a blocking search
+every two seconds per connected client, and the health endpoints call
+`ping()` synchronously. Neither is on the pipeline's hot path, which is why
+they were not converted first.
 
 ---
 
@@ -334,14 +357,16 @@ disproportionate to the harm.
 | Fallback invisible in metrics | Outage looks like health | Nothing, that was the point | **Yes** |
 | Kafka lag | Late RCA, incidents unaffected | Consumer group lag | Bounded, by design |
 | OpenSearch full | Everything dead-letters, UI looks fine | DLQ across all topics | Manual |
-| Rebalance mid-batch | **Silent data loss** | Nothing | **No** |
+| Rebalance mid-batch | Replay, deduplicated | `airs_anomalies_replayed_total` | **Yes** |
 | Malformed model JSON | None, cascade absorbs it | Fallback rate | By design |
-| Fingerprint over-specificity | Degraded incident quality | Manual | **No** |
-| Blocking I/O | Throughput ceiling | Load testing | **No** |
+| Fingerprint over-specificity | Degraded incident quality | Manual | **Yes** |
+| Blocking I/O | Throughput ceiling | Load testing | **Pipeline yes, gateway no** |
 | Late suppression window | Spurious incidents | Manual | Documented |
 
-The three unfixed rows are the honest backlog. The rebalance one is the only
-one that loses data, and it is the one to fix first.
+Every row that lost data or capped throughput is now fixed. What remains is
+the gateway's blocking I/O, which affects SSE fan-out rather than the
+pipeline, and OpenSearch disk pressure, which is an operational procedure
+rather than a defect.
 
 ---
 

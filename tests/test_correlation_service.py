@@ -22,15 +22,14 @@ def fixed_config(correlation, monkeypatch):
     """Pin the per-service window so tests do not depend on OpenSearch."""
 
     def _config(window_minutes: int = 10, min_signals: int = 2):
-        monkeypatch.setattr(
-            correlation,
-            "get_service_config",
-            lambda t, s: correlation.ServiceCorrelationConfig(
+        async def _get(tenant_id, service):
+            return correlation.ServiceCorrelationConfig(
                 window_duration_minutes=window_minutes,
                 min_signal_count=min_signals,
                 fetched_at=datetime.now(UTC),
-            ),
-        )
+            )
+
+        monkeypatch.setattr(correlation, "get_service_config", _get)
 
     _config()
     return _config
@@ -227,12 +226,14 @@ async def test_already_emitted_stale_cluster_is_not_republished(
 async def test_topology_neighbour_becomes_the_parent(
     correlation, producer, fixed_config, monkeypatch
 ):
-    monkeypatch.setattr(correlation, "fetch_topology_neighbors", lambda t, s: {"postgres-primary"})
-    monkeypatch.setattr(
-        correlation,
-        "find_parent_incident",
-        lambda **k: {"_id": "parent-123", "_source": {}},
-    )
+    async def _neighbours(tenant_id, service):
+        return {"postgres-primary"}
+
+    async def _parent(**kwargs):
+        return {"_id": "parent-123", "_source": {}}
+
+    monkeypatch.setattr(correlation, "fetch_topology_neighbors", _neighbours)
+    monkeypatch.setattr(correlation, "find_parent_incident", _parent)
 
     await correlation.process_anomaly(anomaly_at(0, severity=Severity.critical))
 
@@ -246,11 +247,14 @@ async def test_parent_is_resolved_once_and_not_re_resolved(
 ):
     calls: list[int] = []
 
-    def _find(**kwargs):
+    async def _find(**kwargs):
         calls.append(1)
         return {"_id": "parent-123", "_source": {}}
 
-    monkeypatch.setattr(correlation, "fetch_topology_neighbors", lambda t, s: {"db"})
+    async def _neighbours(tenant_id, service):
+        return {"db"}
+
+    monkeypatch.setattr(correlation, "fetch_topology_neighbors", _neighbours)
     monkeypatch.setattr(correlation, "find_parent_incident", _find)
 
     await correlation.process_anomaly(anomaly_at(0, fingerprint="a"))

@@ -1,37 +1,48 @@
-from __future__ import annotations
+"""Ollama's native generate API."""
 
-import json
+from __future__ import annotations
 
 import httpx
 
-from .base import BaseLLMProvider
+from .base import BaseLLMProvider, coerce_json
 
 
 class OllamaProvider(BaseLLMProvider):
-    def __init__(self, base_url: str, model: str, timeout_seconds: int) -> None:
+    kind = "ollama"
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        timeout_seconds: int,
+        extra_headers: dict[str, str] | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.extra_headers = dict(extra_headers or {})
+        self._client = client
 
     async def generate(self, prompt: str, context: dict) -> dict:
-        model = context.get("model", self.model)
         payload = {
-            "model": model,
+            "model": context.get("model", self.model),
             "prompt": prompt,
             "stream": False,
             "format": "json",
             "options": {"temperature": 0.1},
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(f"{self.base_url}/api/generate", json=payload)
+        client = self._client or httpx.AsyncClient(timeout=self.timeout_seconds)
+        try:
+            response = await client.post(
+                f"{self.base_url}/api/generate", json=payload, headers=self.extra_headers
+            )
             response.raise_for_status()
             body = response.json()
+        finally:
+            if self._client is None:
+                await client.aclose()
 
-        generated = body.get("response", "{}")
-        if isinstance(generated, dict):
-            return generated
-        try:
-            return json.loads(generated)
-        except json.JSONDecodeError:
-            return {"raw": generated}
+        return coerce_json(body.get("response", ""))

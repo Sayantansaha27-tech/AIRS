@@ -28,11 +28,44 @@ def test_fingerprint_is_stable_and_scoped(anomaly):
     assert len(a) == 16
 
 
-def test_fingerprint_does_not_collapse_embedded_ids(anomaly):
-    """Known limitation, asserted so a future templatizer has a failing test."""
-    a = anomaly.build_fingerprint("default", "s", "timeout req_id=8a3f")
-    b = anomaly.build_fingerprint("default", "s", "timeout req_id=9b2c")
+def test_fingerprint_collapses_embedded_ids(anomaly):
+    """The same failure with a different request id is one signal, not two.
+
+    Without templatizing, deduplication silently stops working for any service
+    that embeds ids in its messages.
+    """
+    a = anomaly.build_fingerprint("default", "s", "timeout req_id=8a3f2b1c9d0e")
+    b = anomaly.build_fingerprint("default", "s", "timeout req_id=9b2c7f4a1e3d")
+    assert a == b
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("pool exhausted after 1204ms", "pool exhausted after 87ms"),
+        ("conn from 10.0.1.5:5432 refused", "conn from 10.0.2.9:5432 refused"),
+        ("failed at 2026-08-11T02:14:03Z", "failed at 2026-08-11T09:41:55Z"),
+        (
+            "job 3f2b8a1c-4d5e-6f70-8912-a3b4c5d6e7f8 failed",
+            "job 9c8d7e6f-5a4b-3c2d-1e0f-9a8b7c6d5e4f failed",
+        ),
+        ("retry 3 of 5", "retry 4 of 5"),
+        ("segment 0x1f4a corrupt", "segment 0xbeef corrupt"),
+    ],
+)
+def test_varying_values_do_not_split_a_fingerprint(anomaly, first, second):
+    assert anomaly.build_fingerprint("t", "s", first) == anomaly.build_fingerprint("t", "s", second)
+
+
+def test_genuinely_different_messages_still_differ(anomaly):
+    """Templatizing must not collapse unrelated failures into one."""
+    a = anomaly.build_fingerprint("t", "s", "connection pool exhausted")
+    b = anomaly.build_fingerprint("t", "s", "certificate has expired")
     assert a != b
+
+
+def test_templatize_masks_only_the_varying_parts(anomaly):
+    assert anomaly.templatize("timeout after 1204ms on 10.0.0.1") == ("timeout after <qty> on <ip>")
 
 
 # ------------------------------------------------------------ emission gates

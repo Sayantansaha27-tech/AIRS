@@ -50,9 +50,11 @@ who will reasonably ask why a system processing tens of events per second
 needs a distributed log. The honest answer is that the ordering and replay
 properties are load-bearing for the diagnosis workflow, not the throughput.
 
-Consumers currently use auto-commit, so delivery is at-most-once and a crash
-mid-batch loses in-flight events. Manual commits after successful processing
-would fix it. Deferred, and recorded in [05-failure-modes.md](05-failure-modes.md).
+Delivery was at-most-once for a while, because consumers used auto-commit and
+a crash mid-batch lost in-flight events. That is fixed: consumers commit after
+a batch is handled, giving at-least-once, and correlation deduplicates replays
+against a durable key. Exactly-once would need a transaction spanning Kafka and
+OpenSearch and is not built.
 
 ---
 
@@ -193,7 +195,7 @@ minimal OpenSearch.
 
 ## ADR-005: Correlation state in memory
 
-**Status:** accepted, with a known expiry
+**Status:** accepted, partially superseded
 
 ### Context
 
@@ -229,8 +231,15 @@ hedging:
 - The same applies to anomaly-service baselines, which additionally take an
   hour of wall-clock per hour-of-day slot to relearn.
 
-The trigger for moving state to Redis is needing a second replica of either
-service. Until then this is the right trade.
+The trigger for moving state to Redis was needing a second replica of either
+service. It arrived earlier than that and for a different reason: moving Kafka
+off auto-commit required a durable idempotency key, and there was nowhere
+durable to put one.
+
+So deduplication keys are in Redis now, and the pieces still in memory are open
+correlation clusters and anomaly baselines. Two replicas still split those, so
+this ADR is half-retired rather than reversed. The remaining work is mechanical
+and the reason to do it is unchanged.
 
 ---
 

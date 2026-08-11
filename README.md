@@ -128,12 +128,20 @@ ingestion-service, log-processor, anomaly-service, correlation-service and
 ai-service. api-gateway has no DLQ path by design, because it is a synchronous
 REST surface that returns errors to its caller rather than parking them.
 
-**The DLQ is currently write-only.** Events land there with their source topic,
-partition, offset and failure reason, and `airs_dlq_published_total` makes the
-rate visible, but nothing consumes the topic and there is no drain or
-replay-from-DLQ tooling. `POST /v1/admin/replay` replays a topic and offset
-range, which is not the same thing. Draining is a manual operation today; see
-[`docs/07-runbook.md`](docs/07-runbook.md).
+Events land there with their source topic, partition, offset and failure
+reason, and `airs_dlq_published_total` makes the rate visible. Inspect and
+drain it with `tools/dlq.py`:
+
+```bash
+docker compose exec ai-service python /app/tools/dlq.py peek
+docker compose exec ai-service python /app/tools/dlq.py drain --dry-run
+```
+
+Peeking joins no consumer group and commits no offset, so it is repeatable.
+Draining republishes each payload to the topic it failed on, which only
+succeeds if the cause was fixed first. Nothing consumes the DLQ
+automatically, and that is deliberate: an automatic retry of an event that
+failed for a permanent reason is an infinite loop.
 
 ### Service dependency graph
 
@@ -311,7 +319,7 @@ inference:
 
 | | |
 | --- | --- |
-| Sustained ingestion before lag grows | **~200 events/sec** |
+| Sustained ingestion before lag grows | **~1,000 events/sec** |
 | Log to queryable incident, idle | **280 ms** p50 |
 | Log to queryable incident, at 700/sec | 270 ms p50, **45 s** p95 |
 | RCA, deterministic fallback | **< 1 ms** |
@@ -319,16 +327,16 @@ inference:
 | DLQ rate, healthy and degraded | **0** |
 | What breaks first | **correlation-service**, at ~400 events/sec |
 
-200 events/sec is not a large number, and the reason is worth stating: the
-pipeline's own computation benchmarks at roughly 500,000 events/sec, so AIRS is
-I/O bound by about 2,500x. Synchronous OpenSearch calls from inside async loops
-and per-document `refresh=True` account for essentially the whole gap.
+That is a 5x improvement on a first measurement of ~200 events/sec, and the
+gap was entirely I/O rather than computation. The pipeline's own logic
+benchmarks near 500,000 events/sec; the deployed system was losing the
+difference to synchronous OpenSearch calls made from inside async loops and to
+`refresh=True` on every single document.
 
-Above ~400 events/sec correlation-service stops answering its own health
-endpoint entirely: its event loop is blocked, so Kafka heartbeats stop, the
-broker evicts the consumer, and the auto-commit offset write then fails. Method,
-full numbers, RCA quality scoring and an explicit list of what is **not**
-measured are in [`docs/06-evals.md`](docs/06-evals.md).
+At 2,667 events/sec it still processes every event with zero dead-lettered,
+though the tail latency degrades. Method, full before-and-after numbers, RCA
+quality scoring and an explicit list of what is **not** measured are in
+[`docs/06-evals.md`](docs/06-evals.md).
 
 ---
 
@@ -595,7 +603,37 @@ Query params for list: `page`, `size`, `severity`, `service`, `start_time`, `end
 
 ## LLM Provider Abstraction
 
-Adding a new LLM provider is a single-file change:
+**AIRS is model agnostic.** Provider and model live in `config/airs.yaml`, and
+anything speaking the OpenAI chat-completions API works with no code at all:
+OpenAI, vLLM, LM Studio, llama.cpp, Together, Groq, OpenRouter, DeepSeek,
+Mistral. Anthropic and Ollama have their own adapters because their APIs
+differ.
+
+Routing maps severity to a **tier**, and each provider says which of its models
+fills that tier, so switching provider moves every tier together:
+
+```yaml
+llm:
+  provider: ollama            # change this one line to switch
+  routing:
+    critical: primary
+    warning: economy
+    info: deterministic       # no model call at all
+  providers:
+    ollama:
+      kind: ollama
+      base_url: http://ollama:11434
+      models: {primary: qwen2.5:7b-instruct, economy: qwen2.5:1.5b-instruct}
+    groq:
+      kind: openai_compatible
+      base_url: https://api.groq.com/openai/v1
+      api_key_env: GROQ_API_KEY
+      models: {primary: llama-3.3-70b-versatile, economy: llama-3.1-8b-instant}
+```
+
+Full guide: [`docs/11-models.md`](docs/11-models.md).
+
+For an API shape none of the built-in adapters match, add one:
 
 ```python
 # services/ai-service/app/ai_providers/my_provider.py
@@ -609,7 +647,7 @@ class MyProvider(BaseLLMProvider):
         # Must return a dict matching the RCAResult schema:
         # {
         #   "root_cause": str,
-        #   "confidence": float (0–1),
+        #   "confidence": float (0 to 1),
         #   "explanation": str,
         #   "suggested_fix": str,
         #   "affected_services": list[str],
@@ -618,11 +656,32 @@ class MyProvider(BaseLLMProvider):
         ...
 ```
 
-Register it in `build_provider()` in `ai-service/app/main.py` and select it via:
+Register it against a `kind`, then reference that kind from config:
+
+```python
+from ai_providers import register
+
+register(
+    "my_api",
+    lambda cfg, name, model, timeout: MyProvider(
+        base_url=cfg.base_url, model=model, timeout_seconds=timeout
+    ),
+)
+```
+
+```yaml
+providers:
+  my-provider:
+    kind: my_api
+    base_url: https://my-endpoint/v1
+    models: {primary: big-model, economy: small-model}
+```
+
+Switch at runtime without a restart:
 
 ```bash
 curl -X POST http://localhost:8000/v1/llm/config \
-  -d '{"provider": "my_provider", "model": "my-model-name"}'
+  -d '{"provider": "my-provider", "model": "big-model"}'
 ```
 
 ---
@@ -850,6 +909,7 @@ If you only read two, read `01` and `05`.
 | [07: Runbook](docs/07-runbook.md) | Install, upgrade, rollback, backup, on-call triage |
 | [08: Handoff](docs/08-handoff.md) | Operating this without its author |
 | [09: Postmortem](docs/09-postmortem.md) | What would be done differently |
+| [11: Choosing a model](docs/11-models.md) | Provider and model selection, and how to add your own |
 
 ---
 
