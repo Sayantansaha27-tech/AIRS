@@ -7,6 +7,11 @@ from airs_shared.models import RCAResult
 
 PROMPT_TEMPLATE = """
 You are an incident response assistant.
+
+If the context contains `operator_corrections`, an engineer previously judged
+an analysis of this same service wrong and said what the cause actually was.
+Weigh that above your own prior: they saw the system, you are reading logs.
+
 Analyze the incident context and return strict JSON with this schema:
 {{
   "root_cause": "string",

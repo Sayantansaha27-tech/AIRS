@@ -271,3 +271,72 @@ async def test_a_model_outage_never_dead_letters_an_incident(ai, monkeypatch):
 async def _no_sleep(seconds: float) -> None:
     """Collapse retry backoff so the cascade tests stay fast."""
     return None
+
+
+# ------------------------------------------------------------ feedback loop
+
+
+def test_operator_corrections_reach_the_context(ai, monkeypatch):
+    """Closes the loop. Ratings were previously written and read by nothing,
+    so "feedback loop" described collection rather than a loop."""
+    monkeypatch.setattr(
+        ai,
+        "fetch_operator_corrections",
+        lambda t, s: [
+            {
+                "previously_concluded": "network partition",
+                "operator_said": "It was the connection pool, not the network.",
+                "rating": "incorrect",
+            }
+        ],
+    )
+
+    context = ai.build_incident_context(incident())
+    assert context["operator_corrections"][0]["operator_said"].startswith("It was the")
+
+
+def test_corrections_are_visible_to_the_model(ai, monkeypatch):
+    from rca import build_prompt
+
+    monkeypatch.setattr(
+        ai,
+        "fetch_operator_corrections",
+        lambda t, s: [{"operator_said": "connection pool exhaustion", "rating": "incorrect"}],
+    )
+    prompt = build_prompt(ai.build_incident_context(incident()))
+    assert "connection pool exhaustion" in prompt
+    assert "operator_corrections" in prompt
+
+
+def test_the_prompt_tells_the_model_to_weight_corrections():
+    from rca import PROMPT_TEMPLATE
+
+    assert "operator_corrections" in PROMPT_TEMPLATE
+    assert "weigh that above" in PROMPT_TEMPLATE.lower()
+
+
+def test_only_corrected_feedback_is_queried(ai, monkeypatch):
+    """A bare 'unhelpful' with no correction tells a model nothing
+    actionable, so it is not worth prompt budget."""
+    captured: list[dict] = []
+
+    class FakeClient:
+        def search(self, index, body):
+            captured.append(body)
+            return {"hits": {"hits": []}}
+
+    monkeypatch.setattr(ai, "os_client", FakeClient())
+    ai.fetch_operator_corrections("default", "orders-service")
+
+    filters = str(captured[0]["query"]["bool"]["filter"])
+    assert "correction" in filters
+    assert "incorrect" in filters
+
+
+def test_missing_feedback_index_is_not_an_error(ai, monkeypatch):
+    class BrokenClient:
+        def search(self, index, body):
+            raise RuntimeError("index_not_found_exception")
+
+    monkeypatch.setattr(ai, "os_client", BrokenClient())
+    assert ai.fetch_operator_corrections("default", "s") == []

@@ -302,6 +302,60 @@ def fetch_source_metadata(tenant_id: str, service: str) -> dict[str, Any]:
         return {}
 
 
+def fetch_operator_corrections(tenant_id: str, service: str) -> list[dict[str, Any]]:
+    """Past RCAs a human marked wrong, with what they said instead.
+
+    This is what closes the feedback loop. Ratings were previously written to
+    airs-rca-feedback and read by nothing, so the features table called it a
+    feedback loop when it was only collection.
+
+    Only corrected feedback is returned, because "this was unhelpful" with no
+    correction tells a model nothing actionable. A named alternative does.
+    """
+    query = {
+        "query": {
+            "bool": {
+                "filter": [
+                    tenant_scope_filter(tenant_id),
+                    {"terms": {"rating": ["incorrect", "not_helpful"]}},
+                    {"exists": {"field": "correction"}},
+                    {
+                        "bool": {
+                            "should": [
+                                {"term": {"service.keyword": service}},
+                                {"term": {"service": service}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    },
+                ]
+            }
+        },
+        "size": 3,
+        "sort": [{"submitted_at": {"order": "desc"}}],
+    }
+
+    try:
+        result = os_client.search(index=FEEDBACK_INDEX, body=query)
+    except Exception:  # noqa: BLE001
+        return []
+
+    corrections: list[dict[str, Any]] = []
+    for hit in result.get("hits", {}).get("hits", []):
+        source = hit.get("_source", {})
+        correction = str(source.get("correction") or "").strip()
+        if not correction:
+            continue
+        corrections.append(
+            {
+                "previously_concluded": (source.get("rca") or {}).get("root_cause"),
+                "operator_said": correction,
+                "rating": source.get("rating"),
+            }
+        )
+    return corrections
+
+
 def fetch_recent_incidents(
     tenant_id: str,
     service: str,
@@ -496,6 +550,7 @@ def build_incident_context(
             incident.service,
             exclude_id=incident.id,
         ),
+        "operator_corrections": fetch_operator_corrections(incident.tenant_id, incident.service),
         "active_suppressions": fetch_active_suppressions(
             incident.tenant_id,
             incident.service,
@@ -532,6 +587,7 @@ def build_manual_context(logs: list[dict[str, Any]], notes: str | None = None) -
         "anomalies": anomalies,
         "source_metadata": fetch_source_metadata(tenant_id, service),
         "recent_incidents": fetch_recent_incidents(tenant_id, service),
+        "operator_corrections": fetch_operator_corrections(tenant_id, service),
         "active_suppressions": fetch_active_suppressions(tenant_id, service, datetime.now(UTC)),
         "topology": fetch_topology(tenant_id, service),
     }
