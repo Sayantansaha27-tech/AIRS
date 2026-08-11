@@ -606,7 +606,9 @@ curl -X POST http://localhost:8000/v1/llm/config \
 
 ## Kafka Topic Contracts
 
-See [`docs/contracts.md`](docs/contracts.md) for full schema definitions. Summary:
+See [`docs/04-integration-contracts.md`](docs/04-integration-contracts.md) for full
+schema definitions, the DLQ envelope, the error taxonomy and retry semantics.
+Summary:
 
 | Topic | Schema | Producer | Consumers |
 | --- | --- | --- | --- |
@@ -696,8 +698,17 @@ schema work is genuinely done. The boundary work has not been started.
 ├── config/
 │   └── airs.yaml                     # Central pipeline + LLM configuration
 ├── docs/
-│   ├── architecture.mmd              # Mermaid architecture diagram
-│   └── contracts.md                  # Kafka topic schema contracts
+│   ├── 00-problem.md                 # The incident this system exists for
+│   ├── 01-scope-and-non-goals.md     # Limits, including no auth. Read first
+│   ├── 02-architecture.md            # Per-service reference
+│   ├── 03-decisions.md               # ADRs with rejected options
+│   ├── 04-integration-contracts.md   # Topics, schemas, errors, retries
+│   ├── 05-failure-modes.md           # What breaks, blast radius, mitigation
+│   ├── 06-evals.md                   # Measured throughput, latency, RCA quality
+│   ├── 07-runbook.md                 # Install, upgrade, rollback, triage
+│   ├── 08-handoff.md                 # Operating this without its author
+│   ├── 09-postmortem.md              # What would be done differently
+│   └── architecture.mmd              # Mermaid source for the pipeline diagram
 ├── infra/
 │   ├── Dockerfile.python             # Shared Python service base image
 │   └── monitoring/
