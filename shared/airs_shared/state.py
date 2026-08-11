@@ -96,9 +96,10 @@ class RedisStateStore:
         if raw is None:
             return None
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return None
+        return parsed if isinstance(parsed, dict) else None
 
     async def set(self, key: str, value: dict[str, Any], ttl_seconds: int | None = None) -> None:
         payload = json.dumps(value, default=str)
