@@ -143,15 +143,15 @@ fields freely; removing or renaming one needs every stage redeployed together.
 ## Verifying a change
 
 ```bash
-.venv/bin/pytest                        # 131 tests, no infrastructure needed
-.venv/bin/ruff check . && .venv/bin/ruff format --check .
+pytest                                  # 146 tests, no infrastructure needed
+ruff check . && ruff format --check .
 ```
 
 Before shipping anything touching the RCA path, correlation, or ai-service:
 
 ```bash
 docker compose up -d
-AIRS_CHAOS=1 .venv/bin/pytest tests/chaos -v
+AIRS_CHAOS=1 pytest tests/chaos -v
 python evals/run_eval.py --llm --model qwen2.5:7b-instruct
 ```
 

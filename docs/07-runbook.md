@@ -80,7 +80,7 @@ containers as part of the test.
 
 ```bash
 docker compose up -d
-AIRS_CHAOS=1 .venv/bin/pytest tests/chaos -v
+AIRS_CHAOS=1 pytest tests/chaos -v
 ```
 
 It asserts that a stopped ai-service does not stall ingestion, does not fill
