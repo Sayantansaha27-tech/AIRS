@@ -12,6 +12,10 @@ class TopicSettings(BaseModel):
     processed_logs: str = "processed-logs-topic"
     anomalies: str = "anomalies-topic"
     incidents: str = "incidents-topic"
+    # Incidents that have received an RCA, for outbound delivery. Separate from
+    # incidents-topic so that publishing a delivery does not re-enter the RCA
+    # stage and loop.
+    enriched_incidents: str = "enriched-incidents-topic"
     dlq: str = "airs-dlq-topic"
 
 
@@ -113,6 +117,30 @@ class PipelineSettings(BaseModel):
     max_manual_analyze_kb: int = 512
 
 
+class ServiceNowSettings(BaseModel):
+    """Connector configuration.
+
+    The password is never held here. It is read from the environment variable
+    named by `password_env`, so a config file committed to the repository can
+    describe the integration completely without carrying a credential.
+    """
+
+    enabled: bool = False
+    instance_url: str = ""
+    username: str = "admin"
+    password_env: str = "SERVICENOW_PASSWORD"
+    tenant_id: str = "default"
+    poll_interval_seconds: int = Field(default=60, ge=15, le=3600)
+    page_size: int = Field(default=50, ge=1, le=200)
+    # Defaults to on. A work note is visible to real people on a real ticket,
+    # so writing must be a decision someone made, not a default they inherited.
+    dry_run: bool = True
+
+
+class ConnectorSettings(BaseModel):
+    servicenow: ServiceNowSettings = Field(default_factory=ServiceNowSettings)
+
+
 class RedisSettings(BaseModel):
     url: str = "redis://localhost:6379/0"
 
@@ -129,6 +157,7 @@ class AIRSSettings(BaseModel):
     opensearch: OpenSearchSettings = Field(default_factory=OpenSearchSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    connectors: ConnectorSettings = Field(default_factory=ConnectorSettings)
 
 
 @lru_cache(maxsize=1)

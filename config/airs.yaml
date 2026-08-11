@@ -79,6 +79,19 @@ llm:
     #   base_url: http://localhost:8000/v1
     #   models: {primary: meta-llama/Llama-3.3-70B-Instruct, economy: Qwen/Qwen2.5-7B-Instruct}
 
+connectors:
+  servicenow:
+    # Turn on once SERVICENOW_PASSWORD is set in .env. See docs/10-servicenow.md
+    enabled: false
+    instance_url: https://dev386810.service-now.com
+    username: admin
+    password_env: SERVICENOW_PASSWORD
+    tenant_id: default
+    poll_interval_seconds: 60
+    page_size: 50
+    # Leave true until you have read what it would write. See docs/10-servicenow.md
+    dry_run: true
+
 pipeline:
   baseline_window_minutes: 15
   correlation_window_minutes: 10
