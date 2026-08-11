@@ -304,8 +304,31 @@ that never gets a second distinct signal is not an incident at all until its
 correlation window expires. Both behaviours are deliberate, and neither is
 what "real time" implies on its own.
 
-Measured throughput and per-stage percentiles, with the hardware and method
-stated, are in [`docs/06-evals.md`](docs/06-evals.md).
+### Measured
+
+On an Apple M3 (8 cores, 16 GB) running the full Docker stack, CPU-only
+inference:
+
+| | |
+| --- | --- |
+| Sustained ingestion before lag grows | **~200 events/sec** |
+| Log to queryable incident, idle | **280 ms** p50 |
+| Log to queryable incident, at 700/sec | 270 ms p50, **45 s** p95 |
+| RCA, deterministic fallback | **< 1 ms** |
+| RCA, qwen2.5:1.5b-instruct | **20 s** median |
+| DLQ rate, healthy and degraded | **0** |
+| What breaks first | **correlation-service**, at ~400 events/sec |
+
+200 events/sec is not a large number, and the reason is worth stating: the
+pipeline's own computation benchmarks at roughly 500,000 events/sec, so AIRS is
+I/O bound by about 2,500x. Synchronous OpenSearch calls from inside async loops
+and per-document `refresh=True` account for essentially the whole gap.
+
+Above ~400 events/sec correlation-service stops answering its own health
+endpoint entirely: its event loop is blocked, so Kafka heartbeats stop, the
+broker evicts the consumer, and the auto-commit offset write then fails. Method,
+full numbers, RCA quality scoring and an explicit list of what is **not**
+measured are in [`docs/06-evals.md`](docs/06-evals.md).
 
 ---
 
@@ -807,6 +830,41 @@ Inference cost and latency are real. Running the largest model on every `info`-l
 ### Why a shared `airs_shared` library?
 
 Microservices that don't share a contract layer drift. Each service having its own Pydantic models for `Incident` is a bug waiting to happen. The shared library is the single source of truth for all data contracts, settings loading, and Kafka helpers.
+
+---
+
+## Documentation
+
+The docs tree is written against the implementation, not against the intent.
+If you only read two, read `01` and `05`.
+
+| Doc | What it covers |
+| --- | --- |
+| [00: The problem](docs/00-problem.md) | The 2 AM incident this exists for, in an operator's language |
+| [01: Scope and non-goals](docs/01-scope-and-non-goals.md) | **Start here.** What AIRS is not safe for, including the complete absence of auth |
+| [02: Architecture](docs/02-architecture.md) | Per-service reference: topics, state, dependencies |
+| [03: Decisions](docs/03-decisions.md) | ADRs with the rejected options and what each choice costs |
+| [04: Integration contracts](docs/04-integration-contracts.md) | Schemas, DLQ envelope, error taxonomy, retry semantics |
+| [05: Failure modes](docs/05-failure-modes.md) | What breaks, blast radius, detection, mitigation |
+| [06: Evals](docs/06-evals.md) | Measured numbers and what is not measured |
+| [07: Runbook](docs/07-runbook.md) | Install, upgrade, rollback, backup, on-call triage |
+| [08: Handoff](docs/08-handoff.md) | Operating this without its author |
+| [09: Postmortem](docs/09-postmortem.md) | What would be done differently |
+
+---
+
+## Testing
+
+```bash
+pytest                                   # 146 tests, no infrastructure needed
+AIRS_CHAOS=1 pytest tests/chaos          # release gate, needs the full stack
+python evals/run_eval.py --llm           # RCA quality against seeded incidents
+python evals/load_test.py --rate 200     # end-to-end throughput and latency
+```
+
+Every service has contract, happy-path and DLQ tests. The chaos suite proves
+the deterministic fallback holds with ai-service stopped mid-flight, and is
+documented as a release gate rather than run in CI because it stops containers.
 
 ---
 
