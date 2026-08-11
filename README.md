@@ -173,18 +173,44 @@ Three things worth being precise about, because they are easy to overstate:
 
 ### Correlation algorithm
 
+Correlation works on two axes: a time window per service, and a service graph.
+
 ```text
 For each anomaly event:
 
-  1.  Check active suppression windows (fnmatch against service_pattern)
-  2.  If suppressed → drop
-  3.  Look up open incidents for this service within correlation_window (10 min)
-  4.  Compute fingerprint = hash(service + sorted_reasons)
-  5.  If duplicate fingerprint in window → skip (dedup)
-  6.  If existing open incident → append anomaly to timeline + re-escalate severity
-  7.  If no existing incident → create new incident
-  8.  Persist to OpenSearch + emit to incidents-topic
+  1.  Look up the in-memory cluster for (tenant_id, service)
+  2.  If none, or the anomaly falls outside the open cluster's window
+      (window_duration_minutes, default 10, per-service via its data source):
+        close the old cluster, open a new one
+  3.  If the anomaly's fingerprint is already in the cluster:
+        extend the window and stop (dedup)
+  4.  Otherwise add it to the cluster
+  5.  Emit when the cluster first reaches min_signal_count (default 2),
+      or immediately if the anomaly is critical
+  6.  Once open, later anomalies amend that same incident:
+      timeline appended, severity re-escalated, incident id stable
+  7.  Persist to OpenSearch. Republish to incidents-topic on creation and on
+      severity escalation, so a growing incident does not cost one RCA
+      generation per correlated anomaly
+  8.  Clusters idle for longer than their window are closed and flushed
 ```
+
+Alongside the time window, each new incident is linked into the **service
+graph**: correlation-service queries the `airs-topology` index for the
+service's neighbours, then looks for an open incident on one of those
+neighbours in the last 30 minutes. If it finds one, the new incident is
+recorded as its child. That is what turns "five services are all on fire" into
+one parent incident with four children.
+
+Three clarifications, since each is easy to assume otherwise:
+
+- **The service graph is operator-configured, not inferred.** You declare
+  edges via `PUT /v1/topology`. AIRS does not learn topology from traffic.
+- **Suppression windows are applied in anomaly-service, not here.** A
+  suppressed signal never becomes an anomaly, so it never reaches correlation.
+- **The fingerprint is computed upstream too**, in anomaly-service, as
+  `sha1(tenant_id:service:message)`. Correlation consumes it, it does not
+  build it.
 
 ### RCA generation flow
 
@@ -226,7 +252,7 @@ Generate with retries (8s timeout, 2 retries, exponential backoff)
 | **Ingestion** | HTTP POST endpoint, external API polling, synthetic load simulation |
 | **Processing** | Log normalization, OpenSearch indexing, dead-letter queue |
 | **Detection** | per-service seasonal (hour-of-day) EWMA baselines, z-score scoring, keyword scan, configurable detection rules per service |
-| **Correlation** | Time-window grouping, fingerprint deduplication, suppression windows |
+| **Correlation** | Time-window grouping per service, fingerprint deduplication, parent/child linking across a configured service graph |
 | **AI / RCA** | Severity-based model routing, hybrid confidence scoring, deterministic fallback, feedback loop |
 | **API** | REST CRUD, cursor pagination, SSE stream, schema registry, audit log |
 | **Ops** | Prometheus metrics on all services, Grafana dashboards, log/incident retention policies |
