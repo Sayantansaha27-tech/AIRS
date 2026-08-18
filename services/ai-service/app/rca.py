@@ -7,12 +7,7 @@ from airs_shared.models import RCAResult
 
 PROMPT_TEMPLATE = """
 You are an incident response assistant.
-
-If the context contains `operator_corrections`, an engineer previously judged
-an analysis of this same service wrong and said what the cause actually was.
-Weigh that above your own prior: they saw the system, you are reading logs.
-
-Analyze the incident context and return strict JSON with this schema:
+{corrections_note}Analyze the incident context and return strict JSON with this schema:
 {{
   "root_cause": "string",
   "confidence": 0.0,
@@ -27,9 +22,32 @@ Context:
 """
 
 
+CORRECTIONS_NOTE = """
+An engineer previously judged an analysis of this same service wrong and said
+what the cause actually was, under `operator_corrections`. Weigh that above
+your own prior: they saw the system, you are only reading logs.
+
+"""
+
+
 def build_prompt(context: dict) -> str:
-    context_json = json.dumps(context, default=str)
-    return PROMPT_TEMPLATE.format(context_json=context_json)
+    """Render the prompt, mentioning corrections only when there are some.
+
+    The instruction used to be unconditional. Small models then treated it as
+    content rather than as an instruction and answered about it, producing a
+    root cause of "the engineer previously judged the cause as incorrect" on
+    incidents that had no feedback at all. An instruction about data that is
+    not present is worse than no instruction.
+    """
+    payload = dict(context)
+    corrections = payload.get("operator_corrections") or []
+    if not corrections:
+        payload.pop("operator_corrections", None)
+
+    return PROMPT_TEMPLATE.format(
+        corrections_note=CORRECTIONS_NOTE if corrections else "",
+        context_json=json.dumps(payload, default=str),
+    )
 
 
 def heuristic_confidence(context: dict) -> float:

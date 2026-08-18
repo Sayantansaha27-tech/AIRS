@@ -118,11 +118,15 @@ def active_provider_config() -> RuntimeLLMConfig:
     return RuntimeLLMConfig(provider=settings.llm.provider, model="")
 
 
-def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings) -> BaseLLMProvider:
-    """Construct the adapter for the active provider at the requested model.
+def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings, model: str) -> BaseLLMProvider:
+    """Construct the adapter for the active provider at a resolved model.
 
     Which adapter is decided by the provider's declared `kind`, so a new
     OpenAI-compatible endpoint is a config entry rather than a code change.
+
+    `model` must be the model routing resolved for this tier, not
+    `active.model`. The latter is empty whenever nothing is pinned at runtime,
+    which is the normal case.
     """
     provider_cfg = cfg.llm.active(active.provider)
     if provider_cfg is None:
@@ -133,8 +137,8 @@ def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings) -> BaseLLMProvid
     return providers.build(
         provider_name=active.provider,
         cfg=provider_cfg,
-        model=active.model,
-        timeout_seconds=cfg.llm.timeout_seconds,
+        model=model,
+        timeout_seconds=cfg.llm.timeout_for(active.provider),
     )
 
 
@@ -618,7 +622,7 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
     # set to openai with no API key present). That is a model-availability
     # problem like any other and must not deny the incident an RCA.
     try:
-        provider = build_provider(active, settings)
+        provider = build_provider(active, settings, model_name)
     except Exception:  # noqa: BLE001
         logger.exception("LLM provider unavailable, using deterministic RCA")
         return deterministic_fallback(context), DETERMINISTIC
