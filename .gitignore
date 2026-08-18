@@ -22,6 +22,9 @@ env/
 
 # Environment files
 .env
+# Any variant, so a hand-made backup of a secrets file cannot be committed.
+.env.*
+!.env.example
 .env.local
 .env.*.local
 

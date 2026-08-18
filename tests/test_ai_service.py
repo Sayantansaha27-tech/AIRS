@@ -62,19 +62,41 @@ VALID_LLM_PAYLOAD = {
 # ------------------------------------------------------------------ routing
 
 
+@pytest.fixture
+def distinct_tiers(ai, monkeypatch):
+    """The shipped default points both tiers at the same small model so a first
+    run is one download. These tests are about the routing mechanism, so they
+    configure genuinely distinct tiers rather than depending on that default."""
+    provider = ai.settings.llm.providers["ollama"]
+    monkeypatch.setitem(provider.models, "primary", "big-model")
+    monkeypatch.setitem(provider.models, "economy", "small-model")
+    return ai
+
+
 @pytest.mark.parametrize(
     ("severity", "expected_model", "expected_use_llm"),
     [
-        ("critical", "qwen2.5:7b-instruct", True),
-        ("warning", "qwen2.5:1.5b-instruct", True),
+        ("critical", "big-model", True),
+        ("warning", "small-model", True),
         ("info", "deterministic", False),
     ],
 )
-def test_severity_routing_tiers_differ(ai, severity, expected_model, expected_use_llm):
-    active = ai.RuntimeLLMConfig(provider="ollama", model="qwen2.5:7b-instruct")
+def test_severity_routing_tiers_differ(distinct_tiers, severity, expected_model, expected_use_llm):
+    ai = distinct_tiers
+    active = ai.RuntimeLLMConfig(provider="ollama", model="")
     model, use_llm = ai.select_model_for_context({"severity": severity}, active)
     assert model == expected_model
     assert use_llm is expected_use_llm
+
+
+def test_identical_tiers_do_not_cause_a_redundant_retry(ai):
+    """The shipped default: both tiers name the same model, so a failing
+    primary must go straight to deterministic rather than retrying the model
+    that just failed."""
+    active = ai.RuntimeLLMConfig(provider="ollama", model="")
+    primary = ai.model_for_tier(active, "primary")
+    assert ai.settings.llm.providers["ollama"].model_for("economy") == primary
+    assert ai.fallback_tier_model(active, primary) is None
 
 
 def test_warning_tier_follows_the_active_provider_after_a_switch(ai):
@@ -107,17 +129,19 @@ def test_force_model_overrides_routing(ai):
 
 async def test_llm_result_validates_against_rca_contract(ai, monkeypatch):
     provider = StubProvider(payload=VALID_LLM_PAYLOAD)
-    monkeypatch.setattr(ai, "build_provider", lambda a, c: provider)
+    monkeypatch.setattr(ai, "build_provider", lambda a, c, m: provider)
 
     rca, model = await ai.generate_rca(ai.build_incident_context(incident()))
 
     assert isinstance(rca, RCAResult)
-    assert model == "qwen2.5:7b-instruct"
+    assert model == ai.model_for_tier(ai.active_provider_config(), "primary")
     assert rca.root_cause == "Database connection pool exhaustion"
 
 
 async def test_confidence_is_blended_not_passed_through(ai, monkeypatch):
-    monkeypatch.setattr(ai, "build_provider", lambda a, c: StubProvider(payload=VALID_LLM_PAYLOAD))
+    monkeypatch.setattr(
+        ai, "build_provider", lambda a, c, m: StubProvider(payload=VALID_LLM_PAYLOAD)
+    )
     context = ai.build_incident_context(incident())
     rca, _ = await ai.generate_rca(context)
 
@@ -128,7 +152,7 @@ async def test_confidence_is_blended_not_passed_through(ai, monkeypatch):
 
 async def test_missing_evidence_is_backfilled_from_context(ai, monkeypatch):
     payload = dict(VALID_LLM_PAYLOAD, evidence=[])
-    monkeypatch.setattr(ai, "build_provider", lambda a, c: StubProvider(payload=payload))
+    monkeypatch.setattr(ai, "build_provider", lambda a, c, m: StubProvider(payload=payload))
 
     rca, _ = await ai.generate_rca(ai.build_incident_context(incident()))
     assert rca.evidence, "an RCA without evidence cannot be checked by a human"
@@ -144,9 +168,10 @@ def test_context_carries_what_the_model_needs(ai):
 # -------------------------------------------------------- fallback cascade
 
 
-async def test_falls_back_to_the_low_cost_tier_then_deterministic(ai, monkeypatch):
+async def test_falls_back_to_the_low_cost_tier_then_deterministic(distinct_tiers, monkeypatch):
+    ai = distinct_tiers
     provider = StubProvider(error=ConnectionError("connection refused"))
-    monkeypatch.setattr(ai, "build_provider", lambda a, c: provider)
+    monkeypatch.setattr(ai, "build_provider", lambda a, c, m: provider)
     monkeypatch.setattr(ai.asyncio, "sleep", _no_sleep)
 
     rca, model = await ai.generate_rca(ai.build_incident_context(incident()))
@@ -155,14 +180,14 @@ async def test_falls_back_to_the_low_cost_tier_then_deterministic(ai, monkeypatc
     assert isinstance(rca, RCAResult)
     retries = ai.settings.llm.retries + 1
     assert len(provider.calls) == retries * 2, "primary tier then low-cost tier"
-    assert provider.calls[0] == "qwen2.5:7b-instruct"
-    assert provider.calls[-1] == "qwen2.5:1.5b-instruct"
+    assert provider.calls[0] == "big-model"
+    assert provider.calls[-1] == "small-model"
 
 
 async def test_malformed_model_json_falls_through_to_deterministic(ai, monkeypatch):
     # Providers wrap undecodable output as {"raw": ...}, which fails RCAResult.
     monkeypatch.setattr(
-        ai, "build_provider", lambda a, c: StubProvider(payload={"raw": "I think..."})
+        ai, "build_provider", lambda a, c, m: StubProvider(payload={"raw": "I think..."})
     )
     monkeypatch.setattr(ai.asyncio, "sleep", _no_sleep)
 
@@ -175,7 +200,7 @@ async def test_unbuildable_provider_falls_back_rather_than_raising(ai, monkeypat
     """Regression: build_provider() sat outside the guard, so a misconfigured
     provider raised and the incident was dead-lettered with no RCA."""
 
-    def _explode(active, cfg):
+    def _explode(active, cfg, model):
         raise RuntimeError("Missing environment variable: OPENAI_API_KEY")
 
     monkeypatch.setattr(ai, "build_provider", _explode)
@@ -189,7 +214,7 @@ async def test_unbuildable_provider_falls_back_rather_than_raising(ai, monkeypat
 
 async def test_info_severity_never_calls_a_model(ai, monkeypatch):
     provider = StubProvider(payload=VALID_LLM_PAYLOAD)
-    monkeypatch.setattr(ai, "build_provider", lambda a, c: provider)
+    monkeypatch.setattr(ai, "build_provider", lambda a, c, m: provider)
 
     rca, model = await ai.generate_rca(ai.build_incident_context(incident(Severity.info)))
     assert model == "deterministic"
@@ -226,7 +251,9 @@ def test_deterministic_fallback_handles_an_empty_context(ai):
 async def test_process_incident_attaches_rca_and_records_the_path(ai, monkeypatch):
     stored: list[dict] = []
     monkeypatch.setattr(ai, "upsert_doc", lambda c, i, d, body: stored.append(body))
-    monkeypatch.setattr(ai, "build_provider", lambda a, c: StubProvider(payload=VALID_LLM_PAYLOAD))
+    monkeypatch.setattr(
+        ai, "build_provider", lambda a, c, m: StubProvider(payload=VALID_LLM_PAYLOAD)
+    )
 
     await ai.process_incident(incident().model_dump(mode="json"))
 
@@ -257,7 +284,7 @@ async def test_a_model_outage_never_dead_letters_an_incident(ai, monkeypatch):
     monkeypatch.setattr(
         ai,
         "build_provider",
-        lambda a, c: StubProvider(error=TimeoutError("model timed out")),
+        lambda a, c, m: StubProvider(error=TimeoutError("model timed out")),
     )
     monkeypatch.setattr(ai.asyncio, "sleep", _no_sleep)
     stored: list[dict] = []
@@ -309,10 +336,32 @@ def test_corrections_are_visible_to_the_model(ai, monkeypatch):
 
 
 def test_the_prompt_tells_the_model_to_weight_corrections():
-    from rca import PROMPT_TEMPLATE
+    from rca import CORRECTIONS_NOTE
 
-    assert "operator_corrections" in PROMPT_TEMPLATE
-    assert "weigh that above" in PROMPT_TEMPLATE.lower()
+    assert "operator_corrections" in CORRECTIONS_NOTE
+    assert "weigh that above" in CORRECTIONS_NOTE.lower()
+
+
+def test_the_corrections_instruction_is_omitted_when_there_are_none():
+    """Regression: the instruction was unconditional, and a 1.5B model
+    answered about the instruction rather than the incident, returning a root
+    cause of "the engineer previously judged the cause as incorrect" on
+    incidents with no feedback at all."""
+    from rca import build_prompt
+
+    prompt = build_prompt({"service": "s", "logs": [], "operator_corrections": []})
+    assert "previously judged" not in prompt
+    assert "operator_corrections" not in prompt, "empty key must not reach the model"
+
+
+def test_the_corrections_instruction_appears_when_there_are_some():
+    from rca import build_prompt
+
+    prompt = build_prompt(
+        {"service": "s", "logs": [], "operator_corrections": [{"operator_said": "the pool"}]}
+    )
+    assert "previously judged" in prompt
+    assert "the pool" in prompt
 
 
 def test_only_corrected_feedback_is_queried(ai, monkeypatch):
@@ -340,3 +389,41 @@ def test_missing_feedback_index_is_not_an_error(ai, monkeypatch):
 
     monkeypatch.setattr(ai, "os_client", BrokenClient())
     assert ai.fetch_operator_corrections("default", "s") == []
+
+
+# ------------------------------------------------- empty conclusions
+
+
+def test_an_empty_root_cause_is_rejected_by_the_contract():
+    """Found by dry run against a real instance: a 1.5B model returned a blank
+    root_cause, RCAResult accepted it, and the work note that would have been
+    posted to a real ticket read "Root cause:" with nothing after it.
+
+    An analysis with no conclusion is not an analysis. Rejecting it is what
+    makes the cascade fall through to a tier that produces one.
+    """
+    from pydantic import ValidationError
+
+    for blank in ("", "   ", "\n"):
+        with pytest.raises(ValidationError):
+            RCAResult(root_cause=blank, confidence=0.5, explanation="e", suggested_fix="f")
+
+
+async def test_an_empty_root_cause_falls_through_to_the_fallback(ai, monkeypatch):
+    """End to end: a model returning a blank conclusion must not win."""
+    blank = dict(VALID_LLM_PAYLOAD, root_cause="")
+    monkeypatch.setattr(ai, "build_provider", lambda a, c, m: StubProvider(payload=blank))
+    monkeypatch.setattr(ai.asyncio, "sleep", _no_sleep)
+
+    rca, model = await ai.generate_rca(ai.build_incident_context(incident()))
+
+    assert model == "deterministic"
+    assert rca.root_cause, "the fallback always names something"
+
+
+def test_surrounding_whitespace_is_stripped_not_rejected():
+    rca = RCAResult(
+        root_cause="  pool exhausted  ", confidence=0.5, explanation=" e ", suggested_fix=" f "
+    )
+    assert rca.root_cause == "pool exhausted"
+    assert rca.explanation == "e"

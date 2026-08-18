@@ -305,3 +305,51 @@ async def test_a_provider_error_propagates_rather_than_being_swallowed():
     )
     with pytest.raises(httpx.HTTPStatusError):
         await provider.generate("p", {})
+
+
+# ------------------------------------------------- regression: real wiring
+
+# Every other RCA test stubs build_provider, which is exactly why the defect
+# below reached a running system: the real construction path was never
+# exercised with the settings a default install actually uses.
+
+
+def test_build_provider_receives_the_tier_resolved_model(ai):
+    """Regression: build_provider was passed active.model, which is empty
+    whenever nothing is pinned at runtime, i.e. the normal case.
+
+    The registry rejects an empty model, so every LLM call raised
+    ProviderConfigError and silently fell back to the deterministic template.
+    Nothing surfaced it because falling back is a supported outcome.
+    """
+    import inspect
+
+    source = inspect.getsource(ai.generate_rca)
+    assert "build_provider(active, settings, model_name)" in source, (
+        "the resolved tier model must be passed, not active.model"
+    )
+
+
+def test_a_default_install_can_construct_a_provider(ai):
+    """The end-to-end assertion the unit tests were missing: with stock
+    config and nothing pinned, a critical incident must yield a usable
+    provider rather than a configuration error."""
+    active = ai.active_provider_config()
+    assert active.model == "", "nothing pinned is the default state"
+
+    model, use_llm = ai.select_model_for_context({"severity": "critical"}, active)
+    assert use_llm is True
+    assert model, "routing must resolve a model for critical"
+
+    provider = ai.build_provider(active, ai.settings, model)
+    assert provider.model == model
+
+
+def test_every_non_deterministic_tier_constructs(ai):
+    active = ai.active_provider_config()
+    for severity in ("critical", "warning"):
+        model, use_llm = ai.select_model_for_context({"severity": severity}, active)
+        if not use_llm:
+            continue
+        provider = ai.build_provider(active, ai.settings, model)
+        assert provider.model == model, f"{severity} tier must construct"

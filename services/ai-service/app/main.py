@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
-import logging
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import (
     AnalyzeRequest,
     Incident,
@@ -39,7 +39,7 @@ from redis import asyncio as redis_async
 
 settings = get_settings()
 app = FastAPI(title="AIRS AI Service")
-logger = logging.getLogger("ai-service")
+logger = configure_logging("ai-service")
 
 
 @dataclass
@@ -118,11 +118,15 @@ def active_provider_config() -> RuntimeLLMConfig:
     return RuntimeLLMConfig(provider=settings.llm.provider, model="")
 
 
-def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings) -> BaseLLMProvider:
-    """Construct the adapter for the active provider at the requested model.
+def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings, model: str) -> BaseLLMProvider:
+    """Construct the adapter for the active provider at a resolved model.
 
     Which adapter is decided by the provider's declared `kind`, so a new
     OpenAI-compatible endpoint is a config entry rather than a code change.
+
+    `model` must be the model routing resolved for this tier, not
+    `active.model`. The latter is empty whenever nothing is pinned at runtime,
+    which is the normal case.
     """
     provider_cfg = cfg.llm.active(active.provider)
     if provider_cfg is None:
@@ -133,8 +137,8 @@ def build_provider(active: RuntimeLLMConfig, cfg: AIRSSettings) -> BaseLLMProvid
     return providers.build(
         provider_name=active.provider,
         cfg=provider_cfg,
-        model=active.model,
-        timeout_seconds=cfg.llm.timeout_seconds,
+        model=model,
+        timeout_seconds=cfg.llm.timeout_for(active.provider),
     )
 
 
@@ -618,7 +622,7 @@ async def generate_rca(context: dict[str, Any]) -> tuple[RCAResult, str]:
     # set to openai with no API key present). That is a model-availability
     # problem like any other and must not deny the incident an RCA.
     try:
-        provider = build_provider(active, settings)
+        provider = build_provider(active, settings, model_name)
     except Exception:  # noqa: BLE001
         logger.exception("LLM provider unavailable, using deterministic RCA")
         return deterministic_fallback(context), DETERMINISTIC

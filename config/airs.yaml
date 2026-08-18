@@ -39,8 +39,15 @@ llm:
     ollama:
       kind: ollama
       base_url: http://ollama:11434
+      # Measured 20s median for the 1.5B on CPU-only Docker Desktop. The global
+      # 8s below suits a hosted API, not a local model, so override it here.
+      timeout_seconds: 180
       models:
-        primary: qwen2.5:7b-instruct
+        # Both tiers default to the 1.5B so a first run needs one 1 GB pull
+        # rather than 6 GB, and works on a laptop. Raise primary to
+        # qwen2.5:7b-instruct when you have the disk: the routing already
+        # sends critical incidents there, so it is a one-line upgrade.
+        primary: qwen2.5:1.5b-instruct
         economy: qwen2.5:1.5b-instruct
 
     openai:
@@ -83,7 +90,7 @@ connectors:
   servicenow:
     # Turn on once SERVICENOW_PASSWORD is set in .env. See docs/10-servicenow.md
     enabled: false
-    instance_url: https://dev386810.service-now.com
+    instance_url: https://dev294342.service-now.com
     username: admin
     password_env: SERVICENOW_PASSWORD
     tenant_id: default

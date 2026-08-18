@@ -4,7 +4,6 @@ import asyncio
 import fnmatch
 import hashlib
 import json
-import logging
 import math
 import re
 from contextlib import suppress
@@ -16,6 +15,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import (
     AnomalyEvent,
     DetectionRule,
@@ -33,7 +33,7 @@ from prometheus_client import Counter, Gauge, Histogram
 
 settings = get_settings()
 app = FastAPI(title="AIRS Anomaly Service")
-logger = logging.getLogger("anomaly-service")
+logger = configure_logging("anomaly-service")
 
 KEYWORDS = ["error", "exception", "timeout", "connection refused", "oom", "5xx"]
 CRITICAL_MARKERS = ["oom", "connection refused", "5xx"]

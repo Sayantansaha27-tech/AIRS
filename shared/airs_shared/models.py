@@ -95,12 +95,22 @@ class AnomalyEvent(BaseModel):
 
 
 class RCAResult(BaseModel):
-    root_cause: str
+    # Non-empty on purpose. A model that returns a blank conclusion has not
+    # produced an analysis, and the contract must say so rather than letting a
+    # work note with an empty "Root cause:" reach a real ticket. Rejecting it
+    # here is what makes the generation cascade fall through to the next tier,
+    # and ultimately to the deterministic template, which always fills it.
+    root_cause: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
     explanation: str
     suggested_fix: str
     affected_services: list[str] = Field(default_factory=list)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("root_cause", "explanation", "suggested_fix", mode="before")
+    @classmethod
+    def strip_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class Incident(BaseModel):

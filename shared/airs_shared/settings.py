@@ -54,6 +54,10 @@ class ProviderSettings(BaseModel):
     api_key_env: str = ""
     models: dict[str, str] = Field(default_factory=dict)
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    # Latency differs by an order of magnitude between a hosted API and a local
+    # model on CPU, so a single global timeout cannot suit both. Unset means
+    # inherit llm.timeout_seconds.
+    timeout_seconds: int | None = None
 
     def model_for(self, tier: str) -> str | None:
         return self.models.get(tier)
@@ -65,6 +69,10 @@ def _default_providers() -> dict[str, ProviderSettings]:
             kind="ollama",
             base_url="http://localhost:11434",
             models={"primary": "qwen2.5:7b-instruct", "economy": "qwen2.5:1.5b-instruct"},
+            # Measured: 20s median for the 1.5B on CPU-only Docker Desktop, and
+            # substantially more for the 7B. The global 8s default guaranteed a
+            # timeout on exactly the setup the quickstart tells people to run.
+            timeout_seconds=180,
         ),
         "openai": ProviderSettings(
             kind="openai_compatible",
@@ -103,6 +111,13 @@ class LLMSettings(BaseModel):
 
     def tier_for(self, severity: str) -> str:
         return self.routing.get(severity.lower(), DETERMINISTIC)
+
+    def timeout_for(self, provider_name: str | None = None) -> int:
+        """Per-provider timeout, falling back to the global one."""
+        provider = self.active(provider_name)
+        if provider is not None and provider.timeout_seconds is not None:
+            return provider.timeout_seconds
+        return self.timeout_seconds
 
 
 class PipelineSettings(BaseModel):

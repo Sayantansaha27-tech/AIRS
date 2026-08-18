@@ -41,8 +41,11 @@ docker compose ps
 Nothing works end to end until the models exist. Ollama starts empty.
 
 ```bash
-docker exec airs-ollama ollama pull qwen2.5:7b-instruct
-docker exec airs-ollama ollama pull rjmalagon/qwen2:1.5b-instruct
+docker exec airs-ollama ollama pull qwen2.5:1.5b-instruct
+
+# Optional: better analysis on critical incidents, 4.7 GB and slower per call.
+# Set llm.providers.ollama.models.primary to this in config/airs.yaml.
+# docker exec airs-ollama ollama pull qwen2.5:7b-instruct
 ```
 
 Until then, RCA falls through to the deterministic path on every incident,

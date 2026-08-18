@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -14,6 +13,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import AnomalyEvent, DataSource, Incident, Severity
 from airs_shared.monitoring import metrics_response
 from airs_shared.opensearch import (
@@ -30,7 +30,7 @@ from prometheus_client import Counter, Gauge, Histogram
 
 settings = get_settings()
 app = FastAPI(title="AIRS Correlation Service")
-logger = logging.getLogger("correlation-service")
+logger = configure_logging("correlation-service")
 
 
 @dataclass
