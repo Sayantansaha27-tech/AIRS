@@ -86,7 +86,7 @@ connectors:
   servicenow:
     # Turn on once SERVICENOW_PASSWORD is set in .env. See docs/10-servicenow.md
     enabled: false
-    instance_url: https://dev386810.service-now.com
+    instance_url: https://dev294342.service-now.com
     username: admin
     password_env: SERVICENOW_PASSWORD
     tenant_id: default
