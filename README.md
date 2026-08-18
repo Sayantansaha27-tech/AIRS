@@ -390,8 +390,7 @@ All services start with health-gated dependency ordering: the pipeline will not 
 ### 4. Pull LLM models (first run only)
 
 ```bash
-docker exec -it airs-ollama ollama pull qwen2.5:7b-instruct
-docker exec -it airs-ollama ollama pull rjmalagon/qwen2:1.5b-instruct
+docker exec -it airs-ollama ollama pull qwen2.5:1.5b-instruct
 ```
 
 ### 5. Open the dashboard

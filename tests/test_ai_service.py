@@ -62,19 +62,41 @@ VALID_LLM_PAYLOAD = {
 # ------------------------------------------------------------------ routing
 
 
+@pytest.fixture
+def distinct_tiers(ai, monkeypatch):
+    """The shipped default points both tiers at the same small model so a first
+    run is one download. These tests are about the routing mechanism, so they
+    configure genuinely distinct tiers rather than depending on that default."""
+    provider = ai.settings.llm.providers["ollama"]
+    monkeypatch.setitem(provider.models, "primary", "big-model")
+    monkeypatch.setitem(provider.models, "economy", "small-model")
+    return ai
+
+
 @pytest.mark.parametrize(
     ("severity", "expected_model", "expected_use_llm"),
     [
-        ("critical", "qwen2.5:7b-instruct", True),
-        ("warning", "qwen2.5:1.5b-instruct", True),
+        ("critical", "big-model", True),
+        ("warning", "small-model", True),
         ("info", "deterministic", False),
     ],
 )
-def test_severity_routing_tiers_differ(ai, severity, expected_model, expected_use_llm):
-    active = ai.RuntimeLLMConfig(provider="ollama", model="qwen2.5:7b-instruct")
+def test_severity_routing_tiers_differ(distinct_tiers, severity, expected_model, expected_use_llm):
+    ai = distinct_tiers
+    active = ai.RuntimeLLMConfig(provider="ollama", model="")
     model, use_llm = ai.select_model_for_context({"severity": severity}, active)
     assert model == expected_model
     assert use_llm is expected_use_llm
+
+
+def test_identical_tiers_do_not_cause_a_redundant_retry(ai):
+    """The shipped default: both tiers name the same model, so a failing
+    primary must go straight to deterministic rather than retrying the model
+    that just failed."""
+    active = ai.RuntimeLLMConfig(provider="ollama", model="")
+    primary = ai.model_for_tier(active, "primary")
+    assert ai.settings.llm.providers["ollama"].model_for("economy") == primary
+    assert ai.fallback_tier_model(active, primary) is None
 
 
 def test_warning_tier_follows_the_active_provider_after_a_switch(ai):
@@ -112,7 +134,7 @@ async def test_llm_result_validates_against_rca_contract(ai, monkeypatch):
     rca, model = await ai.generate_rca(ai.build_incident_context(incident()))
 
     assert isinstance(rca, RCAResult)
-    assert model == "qwen2.5:7b-instruct"
+    assert model == ai.model_for_tier(ai.active_provider_config(), "primary")
     assert rca.root_cause == "Database connection pool exhaustion"
 
 
@@ -146,7 +168,8 @@ def test_context_carries_what_the_model_needs(ai):
 # -------------------------------------------------------- fallback cascade
 
 
-async def test_falls_back_to_the_low_cost_tier_then_deterministic(ai, monkeypatch):
+async def test_falls_back_to_the_low_cost_tier_then_deterministic(distinct_tiers, monkeypatch):
+    ai = distinct_tiers
     provider = StubProvider(error=ConnectionError("connection refused"))
     monkeypatch.setattr(ai, "build_provider", lambda a, c, m: provider)
     monkeypatch.setattr(ai.asyncio, "sleep", _no_sleep)
@@ -157,8 +180,8 @@ async def test_falls_back_to_the_low_cost_tier_then_deterministic(ai, monkeypatc
     assert isinstance(rca, RCAResult)
     retries = ai.settings.llm.retries + 1
     assert len(provider.calls) == retries * 2, "primary tier then low-cost tier"
-    assert provider.calls[0] == "qwen2.5:7b-instruct"
-    assert provider.calls[-1] == "qwen2.5:1.5b-instruct"
+    assert provider.calls[0] == "big-model"
+    assert provider.calls[-1] == "small-model"
 
 
 async def test_malformed_model_json_falls_through_to_deterministic(ai, monkeypatch):
