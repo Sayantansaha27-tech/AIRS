@@ -366,3 +366,41 @@ def test_missing_feedback_index_is_not_an_error(ai, monkeypatch):
 
     monkeypatch.setattr(ai, "os_client", BrokenClient())
     assert ai.fetch_operator_corrections("default", "s") == []
+
+
+# ------------------------------------------------- empty conclusions
+
+
+def test_an_empty_root_cause_is_rejected_by_the_contract():
+    """Found by dry run against a real instance: a 1.5B model returned a blank
+    root_cause, RCAResult accepted it, and the work note that would have been
+    posted to a real ticket read "Root cause:" with nothing after it.
+
+    An analysis with no conclusion is not an analysis. Rejecting it is what
+    makes the cascade fall through to a tier that produces one.
+    """
+    from pydantic import ValidationError
+
+    for blank in ("", "   ", "\n"):
+        with pytest.raises(ValidationError):
+            RCAResult(root_cause=blank, confidence=0.5, explanation="e", suggested_fix="f")
+
+
+async def test_an_empty_root_cause_falls_through_to_the_fallback(ai, monkeypatch):
+    """End to end: a model returning a blank conclusion must not win."""
+    blank = dict(VALID_LLM_PAYLOAD, root_cause="")
+    monkeypatch.setattr(ai, "build_provider", lambda a, c, m: StubProvider(payload=blank))
+    monkeypatch.setattr(ai.asyncio, "sleep", _no_sleep)
+
+    rca, model = await ai.generate_rca(ai.build_incident_context(incident()))
+
+    assert model == "deterministic"
+    assert rca.root_cause, "the fallback always names something"
+
+
+def test_surrounding_whitespace_is_stripped_not_rejected():
+    rca = RCAResult(
+        root_cause="  pool exhausted  ", confidence=0.5, explanation=" e ", suggested_fix=" f "
+    )
+    assert rca.root_cause == "pool exhausted"
+    assert rca.explanation == "e"
