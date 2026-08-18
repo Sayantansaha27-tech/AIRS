@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from contextlib import suppress
 from datetime import UTC, datetime
 from time import perf_counter
@@ -12,6 +11,7 @@ import httpx
 from aiokafka import AIOKafkaProducer
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import DataSource, IngestRequest, SourceMethod
 from airs_shared.monitoring import metrics_response
 from airs_shared.normalize import normalize_log
@@ -23,7 +23,7 @@ from prometheus_client import Counter, Histogram
 
 settings = get_settings()
 app = FastAPI(title="AIRS Ingestion Service")
-logger = logging.getLogger("ingestion-service")
+logger = configure_logging("ingestion-service")
 
 producer: AIOKafkaProducer | None = None
 source_poll_task: asyncio.Task[None] | None = None

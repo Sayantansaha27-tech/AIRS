@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from contextlib import suppress
 from datetime import UTC, datetime
 from time import perf_counter
@@ -11,6 +10,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import NormalizedLogEvent
 from airs_shared.monitoring import metrics_response
 from airs_shared.normalize import normalize_log
@@ -28,7 +28,7 @@ from prometheus_client import Counter, Gauge, Histogram
 
 settings = get_settings()
 app = FastAPI(title="AIRS Log Processor")
-logger = logging.getLogger("log-processor")
+logger = configure_logging("log-processor")
 
 consumer: AIOKafkaConsumer | None = None
 producer: AIOKafkaProducer | None = None

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -23,6 +22,7 @@ from typing import Any
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import Incident
 from airs_shared.monitoring import metrics_response
 from airs_shared.settings import get_settings
@@ -35,7 +35,7 @@ from servicenow import ServiceNowSource, ServiceNowWorkNoteSink
 
 settings = get_settings()
 app = FastAPI(title="AIRS Connector Service")
-logger = logging.getLogger("connector-service")
+logger = configure_logging("connector-service")
 
 producer: AIOKafkaProducer | None = None
 consumer: AIOKafkaConsumer | None = None

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
-import logging
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from airs_shared.consumer import build_consumer, commit_safely
 from airs_shared.dlq import build_dlq_payload
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import (
     AnalyzeRequest,
     Incident,
@@ -39,7 +39,7 @@ from redis import asyncio as redis_async
 
 settings = get_settings()
 app = FastAPI(title="AIRS AI Service")
-logger = logging.getLogger("ai-service")
+logger = configure_logging("ai-service")
 
 
 @dataclass

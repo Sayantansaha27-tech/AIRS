@@ -15,6 +15,7 @@ from uuid import uuid4
 import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 from airs_shared.kafka import produce_json
+from airs_shared.logging import configure_logging
 from airs_shared.models import (
     DEFAULT_TENANT_ID,
     AnalyzeRequest,
@@ -53,6 +54,7 @@ from redis import asyncio as redis_async
 
 settings = get_settings()
 app = FastAPI(title="AIRS API Gateway")
+logger = configure_logging("api-gateway")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
